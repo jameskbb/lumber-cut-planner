@@ -133,6 +133,7 @@ class ProjectPlanner:
     # Displays the cut layout using matplotlib for each board
     def visualize(self):
         fig, axs = plt.subplots(len(self.lumber), figsize=(10, 5 * len(self.lumber)))
+        fig.canvas.manager.set_window_title('Lumber Cut Planner')
         if len(self.lumber) == 1:
             axs = [axs]
 

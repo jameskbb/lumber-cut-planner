@@ -3,10 +3,11 @@ import { lengthParts, formatLength } from './units.js';
 import * as store from './store.js';
 import { renderSheet, nounFor, svgEl } from './sheet-view.js';
 import { buildShopRows, shopRowsToCsv } from './shop-output.js';
+import { createProjects, webStorageAdapter } from './projects.js';
+import { createProjectList } from './project-list.js';
 
 // Milk-paint colours, one per part row.
 const PALETTE = ['#E4A596', '#93AACB', '#AFC49A', '#EAAA6E', '#A7B2BA', '#92C4B8', '#BDAAD0', '#DDA3B6'];
-const PROGRESS_KEY = 'lumber-cut-planner/progress';
 const PREFS_KEY = 'lumber-cut-planner/prefs';
 const ICONS = {
   remove: 'M5.5 5.5l9 9M14.5 5.5l-9 9',
@@ -44,6 +45,7 @@ function writeJSON(key, value) {
 const prefs = { showCuts: true, purchaseObjective: 'cost', ...readJSON(PREFS_KEY) };
 if (!['cost', 'waste', 'sheetCount'].includes(prefs.purchaseObjective)) prefs.purchaseObjective = 'cost';
 const state = {
+  projectId: null, // null while the project isn't saved yet (the first-run example)
   project: null,
   firstRun: false,
   input: null,
@@ -63,13 +65,156 @@ const letterOf = (id) => store.letterFor(state.partIndex.get(id) ?? 0);
 
 // ---------------------------------------------------------------- persistence
 
+// Saved projects live in src/projects.js; this section connects them to the page.
+let browserStorage = null;
+try { browserStorage = window.localStorage; } catch { /* blocked: projects stay open but unsaved */ }
+const projects = createProjects(webStorageAdapter(browserStorage));
+let projectList;
+
+const emptyProgress = () => ({ sig: '', done: new Set() });
+const toProgress = (p) => ({ sig: p.sig, done: new Set(p.done) });
+
 let saveTimer;
+let dirty = false;
+let saveFailed = false;
 function save() {
+  dirty = true;
+  dismissProjectUndo();
   clearTimeout(saveTimer);
-  saveTimer = setTimeout(() => writeJSON(store.STORAGE_KEY, state.project), 250);
+  saveTimer = setTimeout(persist, 250);
 }
+// Writes the open project now. An unsaved project gets its place in the list here.
+function persist() {
+  clearTimeout(saveTimer);
+  dirty = false;
+  try {
+    if (state.projectId) projects.save(state.projectId, state.project);
+    else { state.projectId = projects.create(state.project).id; saveProgress(); }
+    saveFailed = false;
+  } catch (err) {
+    dirty = true;
+    if (!saveFailed) toast(err.message); // once, not on every keystroke
+    saveFailed = true;
+  }
+}
+function flushSave() {
+  if (dirty) persist();
+}
+// Ticked-off cuts are kept per project.
 function saveProgress() {
-  writeJSON(PROGRESS_KEY, { sig: state.progress.sig, done: [...state.progress.done] });
+  if (state.projectId) projects.writeProgress(state.projectId, { sig: state.progress.sig, done: [...state.progress.done] });
+}
+
+function showProject(id, project, progress, firstRun = false) {
+  clearTimeout(planTimer);
+  Object.assign(state, { projectId: id, project, progress, firstRun, hover: null, pinned: null });
+  if (id) projects.setCurrent(id);
+  renderEditor();
+  runPlan();
+  renderPlan();
+}
+const openState = () => ({ id: state.projectId, project: state.project, progress: state.progress, firstRun: state.firstRun });
+const goBack = (prev) => showProject(prev.id, prev.project, prev.progress, prev.firstRun);
+
+// The Undo that removes a just-created project goes away once that project is edited,
+// so it can never throw away work.
+let projectUndo = null;
+function undoableProject(message, id, prev) {
+  toast(message, {
+    label: 'Undo',
+    run: () => {
+      try { projects.remove(id); } catch { /* it stays in the list; nothing is lost */ }
+      goBack(prev);
+      toast('Undone.');
+    },
+  });
+  projectUndo = { id, line: $('#toast').firstChild };
+}
+function dismissProjectUndo() {
+  if (projectUndo && projectUndo.id === state.projectId && $('#toast').firstChild === projectUndo.line) $('#toast').hidden = true;
+  projectUndo = null;
+}
+
+// New, example, file and shared link each start a saved project. The open one stays in the list.
+function startProject(project, message) {
+  flushSave();
+  const prev = openState();
+  let entry;
+  try { entry = projects.create(project); } catch (err) { toast(err.message); return false; }
+  showProject(entry.id, project, emptyProgress());
+  undoableProject(message, entry.id, prev);
+  return true;
+}
+
+function openProject(id) {
+  if (id === state.projectId) return;
+  flushSave();
+  const project = projects.read(id);
+  if (!project) {
+    const name = projects.list().find((e) => e.id === id)?.name || 'That project';
+    projects.discard(id);
+    toast(`${name} couldn’t be opened because its saved copy is damaged, so it was removed from your projects.`);
+    return;
+  }
+  showProject(id, project, toProgress(projects.readProgress(id)));
+  toast(`Opened ${project.name}.`);
+}
+
+function duplicateProject() {
+  flushSave();
+  const prev = openState();
+  let copy;
+  try { copy = projects.duplicate(state.project); } catch (err) { toast(err.message); return; }
+  showProject(copy.entry.id, copy.project, emptyProgress());
+  undoableProject(`Duplicated ${prev.project.name}.`, copy.entry.id, prev);
+}
+
+function renameProject() {
+  const input = $('#project-name');
+  input.focus();
+  input.select();
+}
+
+// Opens the most recently edited project, or a fresh one when none are left.
+// Returns the fresh one's id and contents, so Undo can tidy it away.
+function openLatest() {
+  for (const e of projects.list()) {
+    const p = projects.read(e.id);
+    if (p) { showProject(e.id, p, toProgress(projects.readProgress(e.id))); return null; }
+    projects.discard(e.id);
+  }
+  const blank = store.blankProject(units());
+  let id = null;
+  try { id = projects.create(blank).id; } catch { /* storage full: it stays open unsaved */ }
+  showProject(id, blank, emptyProgress());
+  return id && { id, text: JSON.stringify(store.sanitizeProject(blank)) };
+}
+
+function deleteProject() {
+  flushSave();
+  const gone = openState();
+  let saved = null;
+  if (gone.id) {
+    try { saved = projects.remove(gone.id); } catch { toast(`Couldn’t delete ${gone.project.name}. This browser’s storage is turned off.`); return; }
+  }
+  const fresh = openLatest();
+  toast(`Deleted ${gone.project.name}.`, {
+    label: 'Undo',
+    run: () => {
+      flushSave();
+      try { if (saved) projects.restore(saved); } catch (err) { toast(err.message); return; }
+      if (fresh && JSON.stringify(projects.read(fresh.id)) === fresh.text) projects.remove(fresh.id);
+      goBack(gone);
+      toast('Undone.');
+    },
+  });
+}
+
+// "Your projects" shows the open project even before it's saved (the first-run example).
+function projectEntries() {
+  flushSave();
+  const list = projects.list();
+  return state.projectId ? list : [{ id: null, name: state.project.name, updatedAt: null }, ...list];
 }
 
 // ---------------------------------------------------------------- feedback
@@ -833,14 +978,15 @@ const commands = {
   print: printPlan,
   labels: printLabels,
   csv: exportCsv,
+  projects: () => projectList.open(),
   new: () => {
-    withUndo('Started a new project.', () => { state.project = store.blankProject(units()); state.firstRun = false; });
+    if (!startProject(store.blankProject(units()), 'Started a new project.')) return;
     setTab('setup');
     focusField('parts', state.project.parts[0].id, 'name');
   },
   open: () => $('#file-input').click(),
   save: saveFile,
-  example: () => withUndo('Loaded the example project.', () => { state.project = store.exampleProject(); }),
+  example: () => startProject(store.exampleProject(), 'Loaded the example project.'),
 };
 
 function bindChrome() {
@@ -849,8 +995,13 @@ function bindChrome() {
     document.title = `${e.target.value || 'Untitled project'} | Lumber Cut Planner`;
     save();
   });
+  let nameBefore = '';
+  $('#project-name').addEventListener('focus', () => { nameBefore = state.project.name; });
   $('#project-name').addEventListener('change', (e) => {
     if (!e.target.value.trim()) { state.project.name = 'Untitled project'; e.target.value = state.project.name; save(); }
+    flushSave();
+    if (state.project.name !== nameBefore) toast(`Renamed to ${state.project.name}.`);
+    nameBefore = state.project.name;
   });
 
   for (const kind of ['stock', 'parts']) {
@@ -917,7 +1068,7 @@ function bindChrome() {
     if (!file) return;
     try {
       const p = store.sanitizeProject(JSON.parse(await file.text()));
-      withUndo(`Opened ${p.name}.`, () => { state.project = p; state.firstRun = false; });
+      startProject(p, `Opened ${p.name}.`);
     } catch (err) {
       toast(err instanceof SyntaxError ? 'That file isn’t a project file. Choose a .json file saved from Lumber Cut Planner.' : err.message);
     }
@@ -932,42 +1083,51 @@ function bindChrome() {
     if (w > 0 && Math.abs(w - lastWidth) > 4) renderPlan();
   }).observe($('#plan-body'));
 
-  window.addEventListener('pagehide', () => { clearTimeout(saveTimer); writeJSON(store.STORAGE_KEY, state.project); });
+  window.addEventListener('pagehide', flushSave);
   window.addEventListener('afterprint', () => { delete document.body.dataset.printMode; });
 }
 
 // ---------------------------------------------------------------- start
 
 async function init() {
-  try {
-    const saved = readJSON(store.STORAGE_KEY);
-    if (saved) state.project = store.sanitizeProject(saved);
-  } catch { /* unreadable saved project: fall through to the example */ }
-  if (!state.project) {
+  // Also moves an older single saved project (and its ticked cuts) into the list.
+  const opened = projects.open();
+  if (opened.project) {
+    state.projectId = opened.id;
+    state.project = opened.project;
+    state.progress = toProgress(opened.progress);
+  } else {
     state.project = store.exampleProject();
     state.firstRun = true;
   }
-  const saved = readJSON(PROGRESS_KEY);
-  state.progress = {
-    sig: typeof saved?.sig === 'string' ? saved.sig : '',
-    done: new Set(Array.isArray(saved?.done) ? saved.done.filter((x) => typeof x === 'string') : []),
-  };
 
+  projectList = createProjectList({
+    h, iconEl, panel: $('#projects'), opener: $('#menu-btn'),
+    entries: projectEntries,
+    currentId: () => state.projectId,
+    actions: { open: openProject, create: () => commands.new(), rename: renameProject, duplicate: duplicateProject, remove: deleteProject },
+  });
   bindChrome();
   renderEditor();
   runPlan();
   renderPlan();
   if (matchMedia('(max-width: 959px)').matches && state.plan.sheets.length) setTab('plan');
+  if (opened.damaged.length) {
+    const n = opened.damaged.length;
+    toast(`${joinWords(opened.damaged)} couldn’t be opened because ${n === 1 ? 'its saved copy is' : 'their saved copies are'} damaged, so ${n === 1 ? 'it was' : 'they were'} removed from your projects.`);
+  }
 
   const m = location.hash.match(/^#p=([A-Za-z0-9_-]+)$/);
   if (m) {
     history.replaceState(null, '', location.pathname + location.search);
+    let shared;
     try {
-      const shared = await store.decodeShare(m[1]);
-      withUndo(`Opened ${shared.name} from a shared link.`, () => { state.project = shared; state.firstRun = false; });
+      shared = await store.decodeShare(m[1]);
     } catch {
-      toast('This share link is incomplete or damaged. Ask for a new link.');
+      shared = null;
     }
+    if (shared) startProject(shared, `Opened ${shared.name} from a shared link.`);
+    else toast('This share link is incomplete or damaged. Ask for a new link.');
   }
 
   if ('serviceWorker' in navigator && /^https?:$/.test(location.protocol)) {

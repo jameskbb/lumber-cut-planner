@@ -37,6 +37,7 @@
       <div class="menu-wrap">
         <button class="btn" id="menu-btn" type="button" aria-haspopup="true" aria-expanded="false" aria-controls="menu">Project</button>
         <div class="menu" id="menu" hidden>
+          <button type="button" data-cmd="projects">Your projects…</button>
           <button type="button" data-cmd="share" class="narrow-only">Share link</button>
           <button type="button" data-cmd="print" class="narrow-only">Print</button>
           <button type="button" data-cmd="labels">Print part labels…</button>
@@ -46,6 +47,7 @@
           <button type="button" data-cmd="save">Save to file</button>
           <button type="button" data-cmd="example">Load example project</button>
         </div>
+        <div class="projects" id="projects" role="dialog" aria-labelledby="projects-h" hidden></div>
       </div>
     </div>
   </header>

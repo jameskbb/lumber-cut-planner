@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data: blob:; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <title>Lumber Cut Planner</title>
+  <meta name="description" content="Plan cuts for plywood sheets and boards. Enter your stock and parts to get a cut diagram, cut order and cut list. Works offline.">
+  <meta name="theme-color" content="#F6F7F6">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Cut Planner">
+  <link rel="preload" href="fonts/archivo-wdth.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="css/app.css">
+  <script type="module" src="src/app.js"></script>
+</head>
+<body data-tab="setup">
+  <a class="skip" href="#plan">Skip to cut plan</a>
+
+  <header class="topbar">
+    <div class="brand">
+      <svg class="mark" viewBox="0 0 32 32" aria-hidden="true">
+        <rect x="1" y="1" width="30" height="30" rx="5" class="mark-wood"/>
+        <rect x="1" y="1" width="30" height="8" rx="2" class="mark-tape"/>
+        <path d="M6 9V5M11 9V6.5M16 9V4M21 9V6.5M26 9V5" class="mark-tick"/>
+        <path d="M14 9v22M14 19h17" class="mark-cut"/>
+      </svg>
+      <span class="wordmark">Lumber Cut Planner</span>
+    </div>
+    <label class="sr-only" for="project-name">Project name</label>
+    <input id="project-name" class="project-name" type="text" autocomplete="off" spellcheck="false" maxlength="120">
+    <div class="actions">
+      <button class="btn wide-only" id="share-btn" type="button">Share link</button>
+      <button class="btn wide-only" id="print-btn" type="button">Print</button>
+      <div class="menu-wrap">
+        <button class="btn" id="menu-btn" type="button" aria-haspopup="true" aria-expanded="false" aria-controls="menu">Project</button>
+        <div class="menu" id="menu" hidden>
+          <button type="button" data-cmd="share" class="narrow-only">Share link</button>
+          <button type="button" data-cmd="print" class="narrow-only">Print</button>
+          <button type="button" data-cmd="new">New project</button>
+          <button type="button" data-cmd="open">Open file…</button>
+          <button type="button" data-cmd="save">Save to file</button>
+          <button type="button" data-cmd="example">Load example project</button>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <div class="app">
+    <aside class="setup" id="setup" aria-label="Materials">
+      <section class="block" aria-labelledby="stock-h">
+        <div class="block-head">
+          <h2 id="stock-h">Stock</h2>
+          <p class="hint">Sheets and boards you have to cut from.</p>
+        </div>
+        <div class="cols" aria-hidden="true"><span></span><span>Length</span><span>Width</span><span>Qty</span></div>
+        <ul class="rows" id="stock-list"></ul>
+        <button class="btn btn-add" id="add-stock" type="button">Add stock</button>
+      </section>
+
+      <section class="block" aria-labelledby="parts-h">
+        <div class="block-head">
+          <h2 id="parts-h">Parts</h2>
+          <p class="hint">Pieces to cut. Length runs along the grain. Sizes like 23 5/8, 23.625 or 2' 6" all work.</p>
+        </div>
+        <div class="cols" aria-hidden="true"><span></span><span>Length</span><span>Width</span><span>Qty</span><span>Grain</span></div>
+        <ul class="rows" id="parts-list"></ul>
+        <button class="btn btn-add" id="add-part" type="button">Add part</button>
+      </section>
+
+      <section class="block" aria-labelledby="settings-h">
+        <div class="block-head"><h2 id="settings-h">Settings</h2></div>
+        <div class="setting">
+          <span class="setting-label" id="units-label">Units</span>
+          <div class="seg" role="radiogroup" aria-labelledby="units-label">
+            <label><input type="radio" name="units" value="in"><span>Inches</span></label>
+            <label><input type="radio" name="units" value="mm"><span>Millimetres</span></label>
+          </div>
+        </div>
+        <div class="setting">
+          <label class="setting-label" for="kerf">Blade kerf</label>
+          <div class="kerf">
+            <input id="kerf" class="in" type="text" autocomplete="off" spellcheck="false" aria-describedby="kerf-hint">
+            <span class="unit" id="kerf-unit"></span>
+          </div>
+          <p class="hint" id="kerf-hint">The width of material your blade removes. Most table saw blades take 1/8".</p>
+        </div>
+      </section>
+    </aside>
+
+    <main class="plan" id="plan" tabindex="-1">
+      <div class="plan-head">
+        <h2>Cut plan</h2>
+        <label class="toggle plan-tools"><input type="checkbox" id="show-cuts"> Number the cuts</label>
+      </div>
+      <div id="plan-body"></div>
+    </main>
+  </div>
+
+  <nav class="tabbar" aria-label="Views">
+    <button type="button" data-tab="setup" aria-pressed="true">Materials</button>
+    <button type="button" data-tab="plan" aria-pressed="false">Cut plan <span class="tab-count" id="tab-count"></span></button>
+  </nav>
+
+  <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+  <input type="file" id="file-input" accept=".json,application/json" hidden>
+  <noscript><p class="noscript">Lumber Cut Planner needs JavaScript to plan cuts.</p></noscript>
+</body>
+</html>

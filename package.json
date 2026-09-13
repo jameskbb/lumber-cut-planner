@@ -1,0 +1,14 @@
+{
+  "name": "lumber-cut-planner",
+  "version": "2.0.0",
+  "private": true,
+  "description": "Plan cuts for sheet goods and boards in the browser, with kerf, grain and cut order.",
+  "type": "module",
+  "scripts": {
+    "start": "node scripts/serve.mjs",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

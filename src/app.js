@@ -1,0 +1,752 @@
+import { planCuts, suggestStock, MAX_INSTANCES } from './planner.js';
+import { lengthParts, formatLength } from './units.js';
+import * as store from './store.js';
+import { renderSheet, nounFor, svgEl } from './sheet-view.js';
+
+// Milk-paint colours, one per part row.
+const PALETTE = ['#E4A596', '#93AACB', '#AFC49A', '#EAAA6E', '#A7B2BA', '#92C4B8', '#BDAAD0', '#DDA3B6'];
+const PROGRESS_KEY = 'lumber-cut-planner/progress';
+const PREFS_KEY = 'lumber-cut-planner/prefs';
+const ICONS = {
+  remove: 'M5.5 5.5l9 9M14.5 5.5l-9 9',
+  grain: 'M2.5 6.5c3-1.6 6 1.6 9 0s4.5-.8 6-.3M2.5 10.5c3-1.6 6 1.6 9 0s4.5-.8 6-.3M2.5 14.5c3-1.6 6 1.6 9 0s4.5-.8 6-.3',
+};
+
+const $ = (sel) => document.querySelector(sel);
+
+function h(tag, props, ...kids) {
+  const el = document.createElement(tag);
+  if (props) {
+    for (const [k, v] of Object.entries(props)) {
+      if (v === null || v === undefined || v === false) continue;
+      if (k.startsWith('on')) el.addEventListener(k.slice(2), v);
+      else if (k === 'class') el.className = v;
+      else if (k === 'dataset') Object.assign(el.dataset, v);
+      else if (k === 'value' || k === 'checked') el[k] = v;
+      else if (k === 'style') for (const [p, val] of Object.entries(v)) el.style.setProperty(p, val);
+      else el.setAttribute(k, v === true ? '' : v);
+    }
+  }
+  for (const kid of kids.flat()) if (kid !== null && kid !== undefined && kid !== false) el.append(kid);
+  return el;
+}
+
+const iconEl = (d) => svgEl('svg', { viewBox: '0 0 20 20', 'aria-hidden': 'true', fill: 'none', stroke: 'currentColor', 'stroke-width': '1.6', 'stroke-linecap': 'round' }, svgEl('path', { d }));
+
+function readJSON(key) {
+  try { const t = localStorage.getItem(key); return t ? JSON.parse(t) : null; } catch { return null; }
+}
+function writeJSON(key, value) {
+  try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* storage blocked or full: the app still works */ }
+}
+
+const prefs = { showCuts: true, ...readJSON(PREFS_KEY) };
+const state = {
+  project: null,
+  firstRun: false,
+  input: null,
+  issues: [],
+  plan: null,
+  suggestion: null,
+  progress: { sig: '', done: new Set() },
+  hover: null,
+  pinned: null,
+  partIndex: new Map(),
+};
+
+const units = () => state.project.units;
+const unitMark = () => (units() === 'mm' ? ' mm' : '"');
+const colorOf = (id) => PALETTE[(state.partIndex.get(id) ?? 0) % PALETTE.length];
+const letterOf = (id) => store.letterFor(state.partIndex.get(id) ?? 0);
+
+// ---------------------------------------------------------------- persistence
+
+let saveTimer;
+function save() {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => writeJSON(store.STORAGE_KEY, state.project), 250);
+}
+function saveProgress() {
+  writeJSON(PROGRESS_KEY, { sig: state.progress.sig, done: [...state.progress.done] });
+}
+
+// ---------------------------------------------------------------- feedback
+
+let toastTimer;
+function toast(message, action) {
+  const el = $('#toast');
+  el.replaceChildren(h('span', null, message));
+  if (action) el.append(h('button', { type: 'button', onclick: () => { el.hidden = true; action.run(); } }, action.label));
+  el.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { el.hidden = true; }, action ? 7000 : 3500);
+}
+
+// Replaces or rewrites the whole project, with an Undo in the toast.
+function withUndo(message, mutate) {
+  const before = structuredClone(state.project);
+  mutate();
+  refreshAll();
+  toast(message, { label: 'Undo', run: () => { state.project = before; refreshAll(); toast('Undone.'); } });
+}
+
+function refreshAll() {
+  renderEditor();
+  save();
+  runPlan();
+  renderPlan();
+}
+
+let planTimer;
+function changed() {
+  state.firstRun = false;
+  save();
+  clearTimeout(planTimer);
+  planTimer = setTimeout(() => { runPlan(); renderPlan(); }, 140);
+}
+
+// ---------------------------------------------------------------- sizes as HTML
+
+function lenEl(value) {
+  const { whole, frac } = lengthParts(value, units());
+  const visual = h('span', { 'aria-hidden': 'true' });
+  if (whole) visual.append(whole);
+  if (frac) {
+    const [n, d] = frac.split('/');
+    visual.append(h('span', { class: 'frac' }, h('sup', null, n), '/', h('sub', null, d)));
+  }
+  return h('span', { class: 'len' }, h('span', { class: 'sr-only' }, formatLength(value, units())), visual);
+}
+const dimsEl = (l, w) => h('span', { class: 'dims' }, lenEl(l), ' × ', lenEl(w));
+
+// ---------------------------------------------------------------- editor
+
+function renderEditor() {
+  const p = state.project;
+  $('#project-name').value = p.name;
+  document.title = `${p.name} | Lumber Cut Planner`;
+  renderRows('stock');
+  renderRows('parts');
+  for (const r of document.querySelectorAll('input[name="units"]')) r.checked = r.value === p.units;
+  const kerf = $('#kerf');
+  kerf.value = p.kerf;
+  kerf.inputMode = p.units === 'mm' ? 'decimal' : 'text';
+  $('#kerf-unit').textContent = p.units === 'mm' ? 'mm' : 'in';
+  $('#kerf-hint').textContent = p.units === 'mm'
+    ? 'The width of material your blade removes. Most table saw blades take about 3 mm.'
+    : 'The width of material your blade removes. Most table saw blades take 1/8".';
+}
+
+function renderRows(kind) {
+  const list = $(kind === 'stock' ? '#stock-list' : '#parts-list');
+  list.replaceChildren(...state.project[kind].map((row, i) => rowEl(kind, row, i)));
+}
+
+function rowInput(kind, row, field, label) {
+  const sizeField = field === 'length' || field === 'width';
+  return h('input', {
+    class: `in in-${field}`,
+    type: 'text',
+    value: row[field] ?? '',
+    'aria-label': label,
+    autocomplete: 'off',
+    spellcheck: 'false',
+    enterkeyhint: 'next',
+    inputmode: field === 'qty' ? 'numeric' : sizeField && units() === 'mm' ? 'decimal' : null,
+    maxlength: field === 'name' ? '80' : '24',
+    placeholder: field === 'name' ? (kind === 'stock' ? 'Material, e.g. 3/4 plywood' : 'Part name') : null,
+    dataset: { kind, id: row.id, field },
+    oninput: (e) => {
+      row[field] = e.target.value;
+      e.target.removeAttribute('aria-invalid');
+      changed();
+      if (kind === 'stock' && field === 'name') refreshFromSelects();
+    },
+    onkeydown: (e) => onRowKey(e, kind, row, field),
+  });
+}
+
+function rowEl(kind, row, i) {
+  const isPart = kind === 'parts';
+  const who = isPart ? `part ${store.letterFor(i)}` : `stock ${i + 1}`;
+  const li = h('li', { class: 'row', dataset: { id: row.id } },
+    isPart
+      ? h('span', { class: 'badge', style: { '--c': PALETTE[i % PALETTE.length] }, 'aria-hidden': 'true' }, store.letterFor(i))
+      : h('span', { class: 'badge badge-stock', 'aria-hidden': 'true' }),
+    rowInput(kind, row, 'name', `Name, ${who}`),
+    rowInput(kind, row, 'length', `Length, ${who}`),
+    rowInput(kind, row, 'width', `Width, ${who}`),
+    rowInput(kind, row, 'qty', `Quantity, ${who}`),
+  );
+  if (isPart) {
+    li.append(h('button', {
+      type: 'button', class: 'grain', 'aria-pressed': String(!!row.grain),
+      'aria-label': `Keep grain along the length, ${who}`,
+      title: 'Keep the grain along the length (the part won’t be turned)',
+      onclick: (e) => { row.grain = !row.grain; e.currentTarget.setAttribute('aria-pressed', String(row.grain)); changed(); },
+    }, iconEl(ICONS.grain)));
+    if (state.project.stock.length > 1) {
+      const sel = h('select', { class: 'in', 'aria-label': `Cut from, ${who}`, onchange: (e) => { row.from = e.target.value; changed(); } });
+      fillFrom(sel, row);
+      li.append(h('label', { class: 'from' }, h('span', { 'aria-hidden': 'true' }, 'Cut from'), sel));
+    }
+    li.addEventListener('pointerenter', () => setHover(row.id));
+    li.addEventListener('pointerleave', () => setHover(null));
+  }
+  // Last in tab order so Tab runs name, length, width, qty; CSS puts it top right.
+  li.append(h('button', { type: 'button', class: 'icon-btn del', 'aria-label': `Remove ${who}`, title: 'Remove', onclick: () => removeRow(kind, row.id) }, iconEl(ICONS.remove)));
+  return li;
+}
+
+function fillFrom(sel, row) {
+  sel.replaceChildren(
+    h('option', { value: '' }, 'Any stock'),
+    ...state.project.stock.map((s, i) => h('option', { value: s.id }, s.name.trim() || `Stock ${i + 1}`)),
+  );
+  sel.value = state.project.stock.some((s) => s.id === row.from) ? row.from : '';
+}
+
+function refreshFromSelects() {
+  for (const li of document.querySelectorAll('#parts-list .row')) {
+    const sel = li.querySelector('.from select');
+    const row = state.project.parts.find((p) => p.id === li.dataset.id);
+    if (sel && row) fillFrom(sel, row);
+  }
+}
+
+function focusField(kind, id, field) {
+  const el = document.querySelector(`[data-kind="${kind}"][data-id="${id}"][data-field="${field}"]`);
+  if (el) { el.focus(); el.select(); }
+}
+
+function onRowKey(e, kind, row, field) {
+  if (e.key !== 'Enter' || e.isComposing) return;
+  e.preventDefault();
+  const rows = state.project[kind];
+  const i = rows.indexOf(row);
+  if (i === rows.length - 1) addRow(kind);
+  else focusField(kind, rows[i + 1].id, field);
+}
+
+function addRow(kind) {
+  const row = kind === 'stock' ? store.blankStock() : store.blankPart();
+  state.project[kind].push(row);
+  if (kind === 'stock') renderRows('parts');
+  renderRows(kind);
+  focusField(kind, row.id, 'name');
+  changed();
+}
+
+function removeRow(kind, id) {
+  const rows = state.project[kind];
+  const i = rows.findIndex((r) => r.id === id);
+  if (i < 0) return;
+  const label = rows[i].name.trim() || (kind === 'stock' ? `stock ${i + 1}` : `part ${store.letterFor(i)}`);
+  withUndo(`Removed ${label}.`, () => {
+    rows.splice(i, 1);
+    if (kind === 'stock') for (const p of state.project.parts) if (p.from === id) p.from = '';
+    if (kind === 'parts' && !rows.length) rows.push(store.blankPart());
+  });
+  const next = state.project[kind][Math.min(i, state.project[kind].length - 1)];
+  if (next) focusField(kind, next.id, 'name');
+  else $(kind === 'stock' ? '#add-stock' : '#add-part').focus();
+}
+
+// Takes someone to the first row that still needs filling in, or a new one.
+function goToEmpty(kind) {
+  setTab('setup');
+  const row = state.project[kind].find((r) => !r.name.trim() && !r.length.trim());
+  if (row) focusField(kind, row.id, 'name'); else addRow(kind);
+}
+
+// ---------------------------------------------------------------- planning
+
+function runPlan() {
+  const { input, issues } = store.toPlanInput(state.project);
+  state.input = input;
+  state.issues = issues;
+  state.plan = planCuts(input);
+  state.suggestion = state.plan.unplaced.some((u) => u.reason === 'no-stock') ? suggestStock(input, state.plan) : null;
+
+  // Ticked-off cuts only make sense for the plan they were ticked on.
+  const sig = JSON.stringify([
+    input.kerf,
+    input.stock.map((s) => [s.id, s.length, s.width, s.qty]),
+    input.parts.map((p) => [p.id, p.length, p.width, p.qty, p.grain, p.from]),
+  ]);
+  if (sig !== state.progress.sig) {
+    state.progress = { sig, done: new Set() };
+    saveProgress();
+  }
+}
+
+// The field being typed in isn't flagged until the person leaves it, so
+// "23 5/" doesn't flash an error halfway through typing a fraction.
+function visibleIssues() {
+  const a = document.activeElement;
+  const typing = a && a.dataset && a.dataset.field ? { id: a.dataset.id || 'kerf', field: a.dataset.field } : null;
+  return state.issues.filter((i) => !(typing && i.id === typing.id && i.fields.includes(typing.field)));
+}
+
+const FIELD_NAMES = { length: 'length', width: 'width', qty: 'quantity', kerf: 'blade kerf' };
+const joinWords = (words) => (words.length > 1 ? `${words.slice(0, -1).join(', ')} and ${words.at(-1)}` : words[0]);
+
+function describeInvalid(issue) {
+  if (issue.kind === 'settings') return units() === 'mm' ? 'use a size like 3 or 3.2' : 'use a size like 1/8 or 0.125';
+  const sizes = issue.fields.filter((f) => f !== 'qty');
+  const parts = [];
+  if (sizes.length) parts.push(`${joinWords(sizes.map((f) => FIELD_NAMES[f]))} should look like ${units() === 'mm' ? '600 or 600.5' : '23 5/8, 23.625 or 2\' 6"'}`);
+  if (issue.fields.includes('qty')) parts.push(`quantity must be a whole number from 1 to ${store.MAX_QTY}`);
+  return parts.join('; ');
+}
+
+function focusIssue(issue) {
+  setTab('setup');
+  if (issue.kind === 'settings') { $('#kerf').focus(); return; }
+  focusField(issue.kind === 'part' ? 'parts' : 'stock', issue.id, issue.fields[0]);
+}
+
+function issueNotices(issues) {
+  const out = [];
+  const invalid = issues.filter((i) => i.type === 'invalid');
+  const incomplete = issues.filter((i) => i.type === 'incomplete');
+  if (invalid.length) {
+    out.push(h('div', { class: 'notice is-problem' },
+      h('p', null, invalid.length === 1
+        ? 'One entry can’t be read, so it’s left out of the plan.'
+        : `${invalid.length} entries can’t be read, so they’re left out of the plan.`),
+      h('ul', null, invalid.map((i) => h('li', null,
+        h('button', { type: 'button', class: 'linkish', onclick: () => focusIssue(i) }, i.label), `: ${describeInvalid(i)}.`)))));
+  }
+  if (incomplete.length) {
+    out.push(h('div', { class: 'notice' },
+      h('ul', null, incomplete.map((i) => h('li', null,
+        h('button', { type: 'button', class: 'linkish', onclick: () => focusIssue(i) }, i.label),
+        ` needs a ${joinWords(i.fields.map((f) => FIELD_NAMES[f]))}.`)))));
+  }
+  return out;
+}
+
+function unplacedNotices() {
+  const { plan, suggestion, input } = state;
+  const out = [];
+  const short = plan.unplaced.filter((u) => u.reason === 'no-stock');
+  const tooBig = plan.unplaced.filter((u) => u.reason === 'too-big');
+
+  if (short.length) {
+    const names = short.map((u) => (u.count > 1 ? `${u.name} ×${u.count}` : u.name));
+    const box = h('div', { class: 'notice is-problem' }, h('p', null, `There isn’t enough stock for ${joinWords(names)}.`));
+    const row = suggestion && state.project.stock.find((s) => s.id === suggestion.stockId);
+    const stock = suggestion && input.stock.find((s) => s.id === suggestion.stockId);
+    if (row && stock) {
+      // "sheet of 3/4 plywood", never "1 3/4 plywood", which reads as a fraction.
+      const noun = nounFor(stock, units()).toLowerCase();
+      const what = `${suggestion.add} ${noun}${suggestion.add === 1 ? '' : 's'} of ${stock.name}`;
+      box.append(h('button', {
+        type: 'button', class: 'btn btn-dark',
+        onclick: () => withUndo(`Added ${what}.`, () => { row.qty = String((parseInt(row.qty, 10) || 0) + suggestion.add); }),
+      }, `Add ${suggestion.add} more ${noun}${suggestion.add === 1 ? '' : 's'} of ${stock.name}`));
+    } else {
+      box.append(h('p', null, 'Add more stock or reduce the quantities.'));
+    }
+    out.push(box);
+  }
+
+  for (const u of tooBig) {
+    const part = input.parts.find((p) => p.id === u.partId);
+    const allowed = input.stock.filter((s) => !part.from || s.id === part.from);
+    const turnFits = part.grain && allowed.some((s) => part.width <= s.length && part.length <= s.width);
+    const box = h('div', { class: 'notice is-problem' },
+      h('p', null, `${u.name} (`, dimsEl(u.length, u.width), `) is bigger than any stock it can be cut from.`));
+    if (turnFits) {
+      const row = state.project.parts.find((p) => p.id === u.partId);
+      box.append(
+        h('p', null, 'It would fit if it could be turned so the grain runs across it.'),
+        h('button', { type: 'button', class: 'btn', onclick: () => withUndo(`${u.name} can now be turned.`, () => { row.grain = false; }) }, 'Allow turning this part'));
+    }
+    out.push(box);
+  }
+  return out;
+}
+
+function summaryEl() {
+  const { stats, sheets } = state.plan;
+  if (!sheets.length) return h('p', { class: 'summary' }, 'None of the parts fit on the stock you have.');
+  const counts = new Map();
+  for (const s of sheets) {
+    const noun = nounFor(s, units()).toLowerCase();
+    counts.set(noun, (counts.get(noun) || 0) + 1);
+  }
+  const where = [...counts].map(([noun, c]) => `${c} ${noun}${c === 1 ? '' : 's'}`).join(' and ');
+  const pct = Math.round(stats.yield * 100);
+  let lead;
+  if (stats.partsPlaced < stats.partsTotal) lead = `${stats.partsPlaced} of ${stats.partsTotal} parts fit on `;
+  else if (stats.partsTotal === 1) lead = 'The part fits on ';
+  else lead = `All ${stats.partsTotal} parts fit on `;
+  return h('p', { class: 'summary' }, lead, h('strong', null, where), `, using ${pct}% of the material.`);
+}
+
+function emptyEl(hasStock, hasParts) {
+  let message, action;
+  if (!hasStock && !hasParts) {
+    message = 'Add the stock you have and the parts you need. The layout appears here as you type.';
+    action = h('button', { type: 'button', class: 'btn btn-dark', onclick: () => goToEmpty('stock') }, 'Add stock');
+  } else if (!hasParts) {
+    message = 'Add the parts you need to cut. The layout appears here as you type.';
+    action = h('button', { type: 'button', class: 'btn btn-dark', onclick: () => goToEmpty('parts') }, 'Add a part');
+  } else {
+    message = 'Add the sheets or boards you have to cut from.';
+    action = h('button', { type: 'button', class: 'btn btn-dark', onclick: () => goToEmpty('stock') }, 'Add stock');
+  }
+  return h('div', { class: 'empty' }, h('p', null, message),
+    h('div', { class: 'actions-row' }, action, ' ', h('button', { type: 'button', class: 'btn', onclick: () => commands.example() }, 'Load example project')));
+}
+
+function sheetEl(sheet, i, width) {
+  const key = String(i);
+  const title = `${nounFor(sheet, units())} ${i + 1}`;
+  const svg = renderSheet(sheet, {
+    width,
+    maxHeight: Math.max(320, window.innerHeight * 0.72),
+    units: units(),
+    colorOf,
+    letterOf,
+    done: state.progress.done,
+    showCuts: prefs.showCuts,
+    key,
+    label: `${title}, ${sheet.stockName}: layout of ${sheet.placements.length} parts. The cut list below describes it.`,
+  });
+  svg.addEventListener('pointerover', (e) => { const g = e.target.closest('.sv-part'); setHover(g ? g.dataset.part : null); });
+  svg.addEventListener('pointerleave', () => setHover(null));
+  svg.addEventListener('click', (e) => {
+    const g = e.target.closest('.sv-part');
+    state.pinned = g && state.pinned !== g.dataset.part ? g.dataset.part : null;
+    applyHighlight();
+  });
+
+  const steps = sheet.cuts.length
+    ? h('ol', { class: 'steps' }, sheet.cuts.map((c) => stepEl(c, `${key}-${c.n}`)))
+    : h('p', { class: 'hint' }, 'No cuts needed: the part uses the whole piece.');
+
+  const groups = new Map();
+  for (const p of sheet.placements) {
+    const g = groups.get(p.partId) || { partId: p.partId, name: p.name, count: 0 };
+    g.count += 1;
+    groups.set(p.partId, g);
+  }
+  const partList = h('ul', { class: 'plist' }, [...groups.values()].map((g) => {
+    const part = state.input.parts.find((p) => p.id === g.partId);
+    const li = h('li', { dataset: { part: g.partId } },
+      h('span', { class: 'badge', style: { '--c': colorOf(g.partId) }, 'aria-hidden': 'true' }, letterOf(g.partId)),
+      h('span', null, h('span', { class: 'name' }, g.name), ' ', dimsEl(part.length, part.width)),
+      h('span', { class: 'qty' }, `×${g.count}`));
+    li.addEventListener('pointerenter', () => setHover(g.partId));
+    li.addEventListener('pointerleave', () => setHover(null));
+    return li;
+  }));
+
+  const minKeep = units() === 'mm' ? 75 : 3;
+  const keep = sheet.offcuts.filter((o) => Math.min(o.l, o.w) >= minKeep).slice(0, 6);
+
+  return h('article', { class: 'sheet', 'aria-labelledby': `sheet-h-${key}` },
+    h('div', { class: 'sheet-head' },
+      h('h3', { id: `sheet-h-${key}` }, title),
+      h('span', { class: 'sheet-meta' }, `${sheet.stockName}, `, dimsEl(sheet.length, sheet.width)),
+      h('span', { class: 'sheet-yield' }, `${Math.round(sheet.yield * 100)}% used`)),
+    h('figure', null, svg),
+    h('div', { class: 'sheet-body' },
+      h('section', null, h('h4', null, 'Cut order'), steps),
+      h('section', null,
+        h('h4', null, 'Parts'), partList,
+        keep.length ? h('div', { class: 'offcuts' }, h('h4', null, 'Offcuts worth keeping'),
+          h('ul', null, keep.map((o) => h('li', null, dimsEl(o.l, o.w))))) : null)));
+}
+
+function stepEl(c, cutKey) {
+  const done = state.progress.done.has(cutKey);
+  const rip = c.type === 'rip';
+  const li = h('li', { class: done ? 'is-done' : null, dataset: { cut: cutKey } },
+    h('label', null,
+      h('input', { type: 'checkbox', checked: done, onchange: (e) => markCut(cutKey, e.target.checked) }),
+      h('span', { class: 'step-n', 'aria-hidden': 'true' }, String(c.n)),
+      h('span', null,
+        h('span', { class: 'step-text' },
+          h('span', { class: 'sr-only' }, `Cut ${c.n}: `),
+          `${rip ? 'Rip' : 'Crosscut'} the `, dimsEl(c.piece.l, c.piece.w), ' piece at ', lenEl(c.offset)),
+        h('span', { class: 'step-from' }, rip ? 'measured from its top edge' : 'measured from its left end'))));
+  li.addEventListener('pointerenter', () => setCutHighlight(cutKey));
+  li.addEventListener('pointerleave', () => setCutHighlight(null));
+  li.addEventListener('focusin', () => setCutHighlight(cutKey));
+  li.addEventListener('focusout', () => setCutHighlight(null));
+  return li;
+}
+
+function markCut(cutKey, done) {
+  if (done) state.progress.done.add(cutKey); else state.progress.done.delete(cutKey);
+  saveProgress();
+  for (const el of document.querySelectorAll(`[data-cut="${cutKey}"]`)) el.classList.toggle('is-done', done);
+}
+
+let lastWidth = 0;
+function planWidth() {
+  const w = $('#plan-body').clientWidth;
+  return w > 0 ? w : Math.min(window.innerWidth - 32, 1200);
+}
+
+function renderPlan() {
+  const { plan, input } = state;
+  state.partIndex = new Map(state.project.parts.map((p, i) => [p.id, i]));
+  const issues = visibleIssues();
+  const kids = [
+    h('div', { class: 'print-head' },
+      h('h1', null, state.project.name),
+      h('p', null, `Sizes in ${units() === 'mm' ? 'millimetres' : 'inches'}. Blade kerf ${formatLength(input.kerf, units())}${unitMark()}.`)),
+  ];
+
+  if (state.firstRun) {
+    kids.push(h('div', { class: 'notice' },
+      h('p', null, 'This is an example project, so you can see how a plan looks. Change any size and the plan updates.'),
+      h('button', { type: 'button', class: 'btn btn-dark', onclick: () => commands.new() }, 'Start your own project')));
+  }
+
+  const hasStock = input.stock.length > 0;
+  const hasParts = input.parts.length > 0;
+  if (plan.error === 'too-many-parts') {
+    kids.push(h('div', { class: 'notice is-problem' },
+      h('p', null, `That’s more than ${MAX_INSTANCES.toLocaleString()} parts, which is too many to plan at once. Split the project into smaller batches.`)));
+  } else if (hasStock && hasParts) {
+    kids.push(summaryEl());
+  }
+  kids.push(...issueNotices(issues));
+
+  if (!hasStock || !hasParts) {
+    kids.push(emptyEl(hasStock, hasParts));
+  } else if (!plan.error) {
+    kids.push(...unplacedNotices());
+    const width = planWidth();
+    lastWidth = width;
+    plan.sheets.forEach((s, i) => kids.push(sheetEl(s, i, width)));
+  }
+
+  $('#plan-body').replaceChildren(...kids);
+  applyFieldErrors(issues);
+  applyHighlight();
+  updateTabCount(issues);
+}
+
+function applyFieldErrors(issues) {
+  for (const el of document.querySelectorAll('[aria-invalid="true"]')) el.removeAttribute('aria-invalid');
+  for (const i of issues) {
+    if (i.type !== 'invalid') continue;
+    for (const f of i.fields) {
+      const el = f === 'kerf' ? $('#kerf')
+        : document.querySelector(`[data-kind="${i.kind === 'part' ? 'parts' : 'stock'}"][data-id="${i.id}"][data-field="${f}"]`);
+      if (el) el.setAttribute('aria-invalid', 'true');
+    }
+  }
+}
+
+function updateTabCount(issues) {
+  const el = $('#tab-count');
+  const problems = issues.filter((i) => i.type === 'invalid').length + state.plan.unplaced.length;
+  el.classList.toggle('is-problem', problems > 0);
+  el.textContent = problems ? '!' : state.plan.sheets.length ? String(state.plan.sheets.length) : '';
+  el.title = problems ? 'Needs attention' : '';
+}
+
+// ---------------------------------------------------------------- highlighting
+
+function setHover(id) {
+  state.hover = id;
+  applyHighlight();
+}
+
+function applyHighlight() {
+  const id = state.hover ?? state.pinned;
+  $('#plan-body').classList.toggle('has-hl', !!id);
+  for (const el of document.querySelectorAll('.is-hl[data-part], .row.is-hl')) el.classList.remove('is-hl');
+  if (id) for (const el of document.querySelectorAll(`[data-part="${id}"], .row[data-id="${id}"]`)) el.classList.add('is-hl');
+}
+
+function setCutHighlight(cutKey) {
+  $('#plan-body').classList.toggle('has-cut-hl', !!cutKey);
+  for (const el of document.querySelectorAll('[data-cut].is-hl')) el.classList.remove('is-hl');
+  if (cutKey) for (const el of document.querySelectorAll(`[data-cut="${cutKey}"]`)) el.classList.add('is-hl');
+}
+
+// ---------------------------------------------------------------- chrome
+
+function setTab(tab) {
+  document.body.dataset.tab = tab;
+  for (const b of document.querySelectorAll('.tabbar button')) b.setAttribute('aria-pressed', String(b.dataset.tab === tab));
+}
+
+const slug = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 60);
+
+async function shareLink() {
+  let url;
+  try {
+    url = `${location.origin}${location.pathname}#p=${await store.encodeShare(state.project)}`;
+  } catch {
+    toast('Couldn’t create a link for this project.');
+    return;
+  }
+  if (navigator.share && matchMedia('(pointer: coarse)').matches) {
+    try { await navigator.share({ title: state.project.name, url }); return; } catch (e) { if (e.name === 'AbortError') return; }
+  }
+  try {
+    await navigator.clipboard.writeText(url);
+    toast('Link copied. Anyone with the link can open a copy of this project.');
+  } catch {
+    window.prompt('Copy this link to share the project:', url);
+  }
+}
+
+function saveFile() {
+  const blob = new Blob([JSON.stringify(state.project, null, 2)], { type: 'application/json' });
+  const a = h('a', { href: URL.createObjectURL(blob), download: `${slug(state.project.name) || 'cut-plan'}.json` });
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  toast('Project file saved.');
+}
+
+const commands = {
+  share: shareLink,
+  print: () => window.print(),
+  new: () => {
+    withUndo('Started a new project.', () => { state.project = store.blankProject(units()); state.firstRun = false; });
+    setTab('setup');
+    focusField('parts', state.project.parts[0].id, 'name');
+  },
+  open: () => $('#file-input').click(),
+  save: saveFile,
+  example: () => withUndo('Loaded the example project.', () => { state.project = store.exampleProject(); }),
+};
+
+function bindChrome() {
+  $('#project-name').addEventListener('input', (e) => {
+    state.project.name = e.target.value;
+    document.title = `${e.target.value || 'Untitled project'} | Lumber Cut Planner`;
+    save();
+  });
+  $('#project-name').addEventListener('change', (e) => {
+    if (!e.target.value.trim()) { state.project.name = 'Untitled project'; e.target.value = state.project.name; save(); }
+  });
+
+  $('#add-stock').addEventListener('click', () => addRow('stock'));
+  $('#add-part').addEventListener('click', () => addRow('parts'));
+
+  const kerf = $('#kerf');
+  kerf.dataset.field = 'kerf';
+  kerf.addEventListener('input', () => { state.project.kerf = kerf.value; kerf.removeAttribute('aria-invalid'); changed(); });
+
+  for (const r of document.querySelectorAll('input[name="units"]')) {
+    r.addEventListener('change', () => {
+      if (!r.checked || r.value === units()) return;
+      const to = r.value;
+      withUndo(to === 'mm' ? 'Switched to millimetres.' : 'Switched to inches.', () => {
+        state.project = store.convertProjectUnits(state.project, to);
+      });
+    });
+  }
+
+  // Re-check a field once the person leaves it.
+  $('#setup').addEventListener('focusout', () => setTimeout(() => renderPlan(), 0));
+
+  const showCuts = $('#show-cuts');
+  showCuts.checked = prefs.showCuts;
+  showCuts.addEventListener('change', () => { prefs.showCuts = showCuts.checked; writeJSON(PREFS_KEY, prefs); renderPlan(); });
+
+  $('#share-btn').addEventListener('click', shareLink);
+  $('#print-btn').addEventListener('click', () => window.print());
+
+  const menuBtn = $('#menu-btn');
+  const menu = $('#menu');
+  const items = () => [...menu.querySelectorAll('button')].filter((b) => b.offsetParent !== null);
+  const setMenu = (open) => {
+    menu.hidden = !open;
+    menuBtn.setAttribute('aria-expanded', String(open));
+    if (open) items()[0]?.focus();
+  };
+  menuBtn.addEventListener('click', () => setMenu(menu.hidden));
+  document.addEventListener('click', (e) => { if (!menu.hidden && !e.target.closest('.menu-wrap')) setMenu(false); });
+  menu.addEventListener('keydown', (e) => {
+    const list = items();
+    const i = list.indexOf(document.activeElement);
+    if (e.key === 'Escape') { setMenu(false); menuBtn.focus(); }
+    else if (e.key === 'ArrowDown') { e.preventDefault(); list[(i + 1) % list.length].focus(); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); list[(i - 1 + list.length) % list.length].focus(); }
+  });
+  menu.addEventListener('click', (e) => {
+    const b = e.target.closest('button[data-cmd]');
+    if (!b) return;
+    setMenu(false);
+    commands[b.dataset.cmd]();
+  });
+
+  $('#file-input').addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    e.target.value = '';
+    if (!file) return;
+    try {
+      const p = store.sanitizeProject(JSON.parse(await file.text()));
+      withUndo(`Opened ${p.name}.`, () => { state.project = p; state.firstRun = false; });
+    } catch (err) {
+      toast(err instanceof SyntaxError ? 'That file isn’t a project file. Choose a .json file saved from Lumber Cut Planner.' : err.message);
+    }
+  });
+
+  for (const b of document.querySelectorAll('.tabbar button')) b.addEventListener('click', () => { setTab(b.dataset.tab); window.scrollTo(0, 0); });
+
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && state.pinned) { state.pinned = null; applyHighlight(); } });
+
+  new ResizeObserver(() => {
+    const w = $('#plan-body').clientWidth;
+    if (w > 0 && Math.abs(w - lastWidth) > 4) renderPlan();
+  }).observe($('#plan-body'));
+
+  window.addEventListener('pagehide', () => { clearTimeout(saveTimer); writeJSON(store.STORAGE_KEY, state.project); });
+}
+
+// ---------------------------------------------------------------- start
+
+async function init() {
+  try {
+    const saved = readJSON(store.STORAGE_KEY);
+    if (saved) state.project = store.sanitizeProject(saved);
+  } catch { /* unreadable saved project: fall through to the example */ }
+  if (!state.project) {
+    state.project = store.exampleProject();
+    state.firstRun = true;
+  }
+  const saved = readJSON(PROGRESS_KEY);
+  state.progress = {
+    sig: typeof saved?.sig === 'string' ? saved.sig : '',
+    done: new Set(Array.isArray(saved?.done) ? saved.done.filter((x) => typeof x === 'string') : []),
+  };
+
+  bindChrome();
+  renderEditor();
+  runPlan();
+  renderPlan();
+  if (matchMedia('(max-width: 959px)').matches && state.plan.sheets.length) setTab('plan');
+
+  const m = location.hash.match(/^#p=([A-Za-z0-9_-]+)$/);
+  if (m) {
+    history.replaceState(null, '', location.pathname + location.search);
+    try {
+      const shared = await store.decodeShare(m[1]);
+      withUndo(`Opened ${shared.name} from a shared link.`, () => { state.project = shared; state.firstRun = false; });
+    } catch {
+      toast('This share link is incomplete or damaged. Ask for a new link.');
+    }
+  }
+
+  if ('serviceWorker' in navigator && /^https?:$/.test(location.protocol)) {
+    navigator.serviceWorker.register('sw.js').catch(() => {});
+  }
+}
+
+init();

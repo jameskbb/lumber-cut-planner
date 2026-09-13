@@ -43,7 +43,7 @@ export function buildShopRows(projectName, units, parts, plan, letterFor) {
         thickness: part.thickness ?? '',
         edgeBand: part.edgeBand || 'none',
         units,
-        grain: part.grain ? 'Along length' : 'Unrestricted',
+        grain: part.grain ? 'Along length' : 'Can be turned',
         status,
         sheet: found ? found.sheet.index + 1 : '',
         stock: found ? found.sheet.stockName : '',

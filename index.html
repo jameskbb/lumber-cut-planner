@@ -56,6 +56,8 @@
         <div class="block-head">
           <h2 id="stock-h">Stock</h2>
           <p class="hint">Sheets and boards you have to cut from. Use quantity 0 to list a size you could buy.</p>
+          <label class="toggle extras-toggle"><input type="checkbox" id="stock-extras"> Show thickness and price</label>
+          <p class="hint" id="stock-extras-hint" hidden>Parts with a thickness only use stock of the same thickness. Enter every price in the same currency so the app can compare costs when you need more stock.</p>
         </div>
         <div class="cols" aria-hidden="true"><span></span><span>Length</span><span>Width</span><span>Qty</span></div>
         <ul class="rows" id="stock-list"></ul>
@@ -66,6 +68,8 @@
         <div class="block-head">
           <h2 id="parts-h">Parts</h2>
           <p class="hint">Pieces to cut. Length runs along the grain. Sizes like 23 5/8, 23.625 or 2' 6" all work.</p>
+          <label class="toggle extras-toggle"><input type="checkbox" id="part-extras"> Show thickness, extra size and edge banding</label>
+          <p class="hint" id="part-extras-hint" hidden>Extra length and width are added when cutting, so you can trim to the finished size later. The plan leaves room for them; labels still show the finished size.</p>
         </div>
         <div class="cols" aria-hidden="true"><span></span><span>Length</span><span>Width</span><span>Qty</span><span>Grain</span></div>
         <ul class="rows" id="parts-list"></ul>

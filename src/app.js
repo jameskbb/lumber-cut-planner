@@ -195,43 +195,82 @@ function rowEl(kind, row, i) {
     li.addEventListener('pointerenter', () => setHover(row.id));
     li.addEventListener('pointerleave', () => setHover(null));
   }
-  li.append(rowDetails(kind, row, who));
+  const extras = rowExtras(kind, row, who);
+  if (extras) li.append(extras);
   // Last in tab order so Tab runs name, length, width, qty; CSS puts it top right.
   li.append(h('button', { type: 'button', class: 'icon-btn del', 'aria-label': `Remove ${who}`, title: 'Remove', onclick: () => removeRow(kind, row.id) }, iconEl(ICONS.remove)));
   return li;
 }
 
-function detailField(label, control, hint = '') {
-  return h('label', { class: 'detail-field' }, h('span', null, label), control,
-    hint ? h('small', null, hint) : null);
+// Optional fields sit behind one toggle per section rather than a link on
+// every row (see DESIGN.md).
+const EXTRA_FIELDS = {
+  stock: ['thickness', 'price'],
+  parts: ['thickness', 'lengthAllowance', 'widthAllowance', 'edgeBand'],
+};
+const extrasPref = (kind) => (kind === 'stock' ? 'stockExtras' : 'partExtras');
+const extrasOpen = (kind) => !!prefs[extrasPref(kind)];
+
+function setExtras(kind, open) {
+  prefs[extrasPref(kind)] = open;
+  writeJSON(PREFS_KEY, prefs);
+  $(kind === 'stock' ? '#stock-extras' : '#part-extras').checked = open;
+  $(kind === 'stock' ? '#stock-extras-hint' : '#part-extras-hint').hidden = !open;
+  renderRows(kind);
 }
 
-function rowDetails(kind, row, who) {
-  const isPart = kind === 'parts';
-  const fields = [
-    detailField('Thickness', rowInput(kind, row, 'thickness', `Thickness, ${who}`), 'Optional; matches parts to stock.'),
-  ];
-  if (isPart) {
+const isSet = (row, field) => (field === 'edgeBand' ? !!row.edgeBand && row.edgeBand !== 'none' : !!String(row[field] ?? '').trim());
+
+// A closed section never hides values that change the plan: they're spelled out on the row.
+function extrasSummary(kind, row) {
+  const t = (field) => String(row[field] ?? '').trim();
+  const bits = [];
+  if (isSet(row, 'thickness')) bits.push(`${t('thickness')} thick`);
+  if (kind === 'stock') {
+    if (isSet(row, 'price')) bits.push(`${t('price')} each`);
+  } else {
+    if (isSet(row, 'lengthAllowance')) bits.push(`${t('lengthAllowance')} extra length`);
+    if (isSet(row, 'widthAllowance')) bits.push(`${t('widthAllowance')} extra width`);
+    if (isSet(row, 'edgeBand')) bits.push(edgeBandText(row.edgeBand).toLowerCase());
+  }
+  const s = bits.join(', ');
+  return s && s[0].toUpperCase() + s.slice(1);
+}
+
+function detailField(label, control) {
+  return h('label', { class: 'detail-field' }, h('span', null, label), control);
+}
+
+function rowExtras(kind, row, who) {
+  if (!extrasOpen(kind)) {
+    const summary = extrasSummary(kind, row);
+    if (!summary) return null;
+    const first = EXTRA_FIELDS[kind].find((f) => isSet(row, f));
+    return h('button', {
+      type: 'button', class: 'linkish row-summary', 'aria-label': `${summary}. Edit, ${who}`,
+      onclick: () => { setExtras(kind, true); focusField(kind, row.id, first); },
+    }, summary);
+  }
+  const fields = [detailField('Thickness', rowInput(kind, row, 'thickness', `Thickness, ${who}`))];
+  if (kind === 'parts') {
     fields.push(
-      detailField('Extra length', rowInput(kind, row, 'lengthAllowance', `Extra cut allowance along length, ${who}`)),
-      detailField('Extra width', rowInput(kind, row, 'widthAllowance', `Extra cut allowance along width, ${who}`)),
+      detailField('Extra length', rowInput(kind, row, 'lengthAllowance', `Extra length, ${who}`)),
+      detailField('Extra width', rowInput(kind, row, 'widthAllowance', `Extra width, ${who}`)),
     );
     const edgeBand = h('select', {
-      class: 'in', 'aria-label': `Edges to band, ${who}`, value: row.edgeBand || 'none',
+      class: 'in', 'aria-label': `Edge banding, ${who}`, dataset: { kind, id: row.id, field: 'edgeBand' },
       onchange: (e) => { row.edgeBand = e.target.value; changed(); },
     },
     h('option', { value: 'none' }, 'None'),
-    h('option', { value: 'length' }, 'Both length edges'),
-    h('option', { value: 'width' }, 'Both width edges'),
+    h('option', { value: 'length' }, 'Both long edges'),
+    h('option', { value: 'width' }, 'Both short edges'),
     h('option', { value: 'all' }, 'All four edges'));
     edgeBand.value = row.edgeBand || 'none';
     fields.push(detailField('Edge banding', edgeBand));
   } else {
-    fields.push(detailField('Price per piece', rowInput(kind, row, 'price', `Price per piece, ${who}`), 'Optional; use the same currency for every stock type.'));
+    fields.push(detailField('Price each', rowInput(kind, row, 'price', `Price each, ${who}`)));
   }
-  return h('details', { class: 'row-details' },
-    h('summary', null, isPart ? 'Material & finishing' : 'Thickness & price'),
-    h('div', { class: 'detail-grid' }, fields));
+  return h('div', { class: 'row-extras' }, fields);
 }
 
 function fillFrom(sel, row) {
@@ -251,10 +290,13 @@ function refreshFromSelects() {
 }
 
 function focusField(kind, id, field) {
-  const el = document.querySelector(`[data-kind="${kind}"][data-id="${id}"][data-field="${field}"]`);
+  const selector = `[data-kind="${kind}"][data-id="${id}"][data-field="${field}"]`;
+  let el = document.querySelector(selector);
+  if (!el && EXTRA_FIELDS[kind]?.includes(field) && !extrasOpen(kind)) {
+    setExtras(kind, true);
+    el = document.querySelector(selector);
+  }
   if (el) {
-    const details = el.closest('details');
-    if (details) details.open = true;
     el.focus();
     el.select?.();
   }
@@ -307,7 +349,9 @@ function runPlan() {
   state.input = input;
   state.issues = issues;
   state.plan = planCuts(input);
-  state.recommendation = null;
+  // The optimizer is fast (tens of ms), so the fix is ready without a button press.
+  const short = state.plan.unplaced.some((u) => u.reason === 'no-stock');
+  state.recommendation = short ? recommendStock(input, state.plan, { objective: purchaseObjective() }) : null;
 
   // Ticked-off cuts only make sense for the plan they were ticked on.
   const sig = JSON.stringify([
@@ -374,17 +418,26 @@ function issueNotices(issues) {
 
 const formatPrice = (value) => value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
-function findPurchaseRecommendation() {
-  state.recommendation = recommendStock(state.input, state.plan, { objective: prefs.purchaseObjective });
-  if (!state.recommendation) toast('No listed stock size can resolve all of the remaining parts.');
-  renderPlan();
+const hasPrices = () => state.input.stock.some((s) => s.price != null);
+
+// "Lowest cost" means nothing until prices exist, so fall back to least left over.
+function purchaseObjective() {
+  return prefs.purchaseObjective === 'cost' && !hasPrices() ? 'waste' : prefs.purchaseObjective;
+}
+
+// "1 sheet of 3/4 birch plywood", never "1 3/4 birch plywood".
+function purchaseWords(recommendation) {
+  return joinWords(recommendation.purchases.map((purchase) => {
+    const stock = state.input.stock.find((s) => s.id === purchase.stockId);
+    const noun = stock ? nounFor(stock, units()).toLowerCase() : 'sheet';
+    return `${purchase.qty} ${noun}${purchase.qty === 1 ? '' : 's'} of ${purchase.stockName}`;
+  }));
 }
 
 function applyRecommendedPurchase() {
   const recommendation = state.recommendation;
   if (!recommendation) return;
-  const count = recommendation.totalSheets;
-  withUndo(`Added ${count} purchased stock piece${count === 1 ? '' : 's'}.`, () => {
+  withUndo(`Added ${purchaseWords(recommendation)}.`, () => {
     for (const purchase of recommendation.purchases) {
       const row = state.project.stock.find((stock) => stock.id === purchase.stockId);
       if (row) row.qty = String((parseInt(row.qty, 10) || 0) + purchase.qty);
@@ -402,39 +455,29 @@ function unplacedNotices() {
   if (short.length) {
     const names = short.map((u) => (u.count > 1 ? `${u.name} ×${u.count}` : u.name));
     const box = h('div', { class: 'notice is-problem' }, h('p', null, `There isn’t enough stock for ${joinWords(names)}.`));
-    const objective = h('select', {
-      class: 'in purchase-objective', 'aria-label': 'Purchase optimization goal', value: prefs.purchaseObjective,
-      onchange: (e) => {
-        prefs.purchaseObjective = e.target.value;
-        state.recommendation = null;
-        writeJSON(PREFS_KEY, prefs);
-        renderPlan();
-      },
-    },
-    h('option', { value: 'cost' }, 'Lowest cost'),
-    h('option', { value: 'waste' }, 'Least waste'),
-    h('option', { value: 'sheetCount' }, 'Fewest pieces'));
-    objective.value = prefs.purchaseObjective;
-    box.append(h('div', { class: 'purchase-tools' },
-      h('label', null, h('span', null, 'Optimize purchase'), objective),
-      h('button', { type: 'button', class: 'btn btn-dark', onclick: findPurchaseRecommendation }, recommendation ? 'Recalculate' : 'Find stock to buy')));
     if (recommendation) {
-      const descriptions = recommendation.purchases.map((purchase) => {
-        const stock = input.stock.find((s) => s.id === purchase.stockId);
-        const noun = stock ? nounFor(stock, units()).toLowerCase() : 'piece';
-        return `${purchase.qty} ${noun}${purchase.qty === 1 ? '' : 's'} of ${purchase.stockName}`;
-      });
-      const details = [`${recommendation.totalSheets} piece${recommendation.totalSheets === 1 ? '' : 's'} total`];
-      if (recommendation.totalCost !== null) details.push(`${formatPrice(recommendation.totalCost)} total cost`);
-      details.push(`${Math.round(recommendation.waste * 100)}% extra purchased area`);
-      box.append(h('div', { class: 'purchase-result' },
-        h('p', null, h('strong', null, `Buy ${joinWords(descriptions)}.`), ` ${details.join(' · ')}.`),
-        !recommendation.priceComplete && prefs.purchaseObjective === 'cost'
-          ? h('p', { class: 'hint' }, 'One or more prices are blank, so material area was used as a fallback. Add prices under “Thickness & price” for a true cost comparison.')
-          : null,
-        h('button', { type: 'button', class: 'btn', onclick: applyRecommendedPurchase }, 'Add purchase to stock')));
+      const what = purchaseWords(recommendation);
+      const cost = recommendation.priceComplete && recommendation.totalCost !== null ? `, for ${formatPrice(recommendation.totalCost)}` : '';
+      const leftover = Math.round(recommendation.waste * 100);
+      box.append(h('p', null, `Buying ${what} fits everything${cost}.${leftover >= 1 ? ` About ${leftover}% of it will be left over.` : ''}`));
+
+      const withPrices = hasPrices();
+      const goal = h('select', {
+        class: 'in purchase-objective', 'aria-label': 'Choose what to buy by',
+        onchange: (e) => { prefs.purchaseObjective = e.target.value; writeJSON(PREFS_KEY, prefs); runPlan(); renderPlan(); },
+      },
+      h('option', { value: 'waste' }, 'Least left over'),
+      h('option', { value: 'cost', disabled: !withPrices }, withPrices ? 'Lowest cost' : 'Lowest cost (add prices first)'),
+      h('option', { value: 'sheetCount' }, 'Fewest to buy'));
+      goal.value = purchaseObjective();
+      box.append(h('div', { class: 'purchase-tools' },
+        h('button', { type: 'button', class: 'btn btn-dark', onclick: applyRecommendedPurchase }, `Add ${what}`),
+        h('label', null, h('span', null, 'Choose by'), goal)));
+      if (withPrices && !recommendation.priceComplete && purchaseObjective() === 'cost') {
+        box.append(h('p', { class: 'hint' }, 'Some stock has no price, so it’s compared by size instead.'));
+      }
     } else {
-      box.append(h('p', { class: 'hint' }, 'This compares all listed stock sizes, including types with a quantity of zero.'));
+      box.append(h('p', null, 'None of the listed stock sizes can hold these parts. Add a bigger size under Stock, with quantity 0 if you don’t have it yet.'));
     }
     out.push(box);
   }
@@ -711,7 +754,7 @@ function printPlan() {
 
 function labelEl(row) {
   const location = row.status === 'Placed'
-    ? `Sheet ${row.sheet} · ${row.stock}`
+    ? `Sheet ${row.sheet}, ${row.stock}`
     : row.status;
   const hasAllowance = row.cutLength !== row.length || row.cutWidth !== row.width;
   const notes = [];
@@ -727,7 +770,7 @@ function labelEl(row) {
       hasAllowance ? h('p', { class: 'label-cut-size' }, 'Cut ', dimsEl(row.cutLength, row.cutWidth), h('span', { class: 'label-unit' }, unitMark())) : null),
     h('div', { class: 'label-meta' },
       h('p', null, `Part ${row.instance} of ${row.quantity}`),
-      h('p', null, row.grain === 'Along length' ? 'Grain → length' : 'Grain unrestricted')),
+      h('p', null, row.grain === 'Along length' ? 'Grain along the length' : 'Can be turned')),
     notes.length ? h('p', { class: 'label-notes' }, notes) : null,
     h('p', { class: 'label-location' }, location));
 }
@@ -736,7 +779,7 @@ function printLabels() {
   const rows = shopRows();
   if (!rows.length) { toast('Add at least one complete part before printing labels.'); return; }
   $('#part-labels').replaceChildren(
-    h('header', { class: 'labels-head' }, h('h1', null, `${state.project.name} · Part labels`), h('p', null, `${rows.length} label${rows.length === 1 ? '' : 's'}`)),
+    h('header', { class: 'labels-head' }, h('h1', null, state.project.name), h('p', null, `${rows.length} part label${rows.length === 1 ? '' : 's'}`)),
     h('div', { class: 'label-grid' }, rows.map(labelEl)));
   document.body.dataset.printMode = 'labels';
   // Let the browser lay out the newly-created label grid before opening preview.
@@ -809,6 +852,13 @@ function bindChrome() {
   $('#project-name').addEventListener('change', (e) => {
     if (!e.target.value.trim()) { state.project.name = 'Untitled project'; e.target.value = state.project.name; save(); }
   });
+
+  for (const kind of ['stock', 'parts']) {
+    const box = $(kind === 'stock' ? '#stock-extras' : '#part-extras');
+    box.checked = extrasOpen(kind);
+    $(kind === 'stock' ? '#stock-extras-hint' : '#part-extras-hint').hidden = !extrasOpen(kind);
+    box.addEventListener('change', () => setExtras(kind, box.checked));
+  }
 
   $('#add-stock').addEventListener('click', () => addRow('stock'));
   $('#add-part').addEventListener('click', () => addRow('parts'));

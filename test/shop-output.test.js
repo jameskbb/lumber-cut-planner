@@ -31,7 +31,7 @@ test('builds one shop row per physical part and preserves placement references',
   assert.equal(rows[1].stock, '3/4 plywood');
   assert.equal(rows[1].instance, 2);
   assert.equal(rows[2].rotated, true);
-  assert.equal(rows[2].grain, 'Unrestricted');
+  assert.equal(rows[2].grain, 'Can be turned');
 });
 
 test('CSV includes formatted dimensions, correct quoting, and formula protection', () => {

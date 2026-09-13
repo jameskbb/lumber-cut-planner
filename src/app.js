@@ -3,6 +3,7 @@ import { lengthParts, formatLength } from './units.js';
 import * as store from './store.js';
 import { renderSheet, nounFor, svgEl } from './sheet-view.js';
 import { buildShopRows, shopRowsToCsv } from './shop-output.js';
+import { createShopMode } from './shop-mode.js';
 
 // Milk-paint colours, one per part row.
 const PALETTE = ['#E4A596', '#93AACB', '#AFC49A', '#EAAA6E', '#A7B2BA', '#92C4B8', '#BDAAD0', '#DDA3B6'];
@@ -641,7 +642,17 @@ function markCut(cutKey, done) {
   if (done) state.progress.done.add(cutKey); else state.progress.done.delete(cutKey);
   saveProgress();
   for (const el of document.querySelectorAll(`[data-cut="${cutKey}"]`)) el.classList.toggle('is-done', done);
+  shopMode.syncEntry();
 }
+
+// Shop mode shares the checklist's progress, so it ticks cuts through markCut.
+const shopMode = createShopMode({
+  h, lenEl, dimsEl, units, colorOf, letterOf, markCut, printLabels,
+  getPlan: () => state.plan,
+  getDone: () => state.progress.done,
+  // markCut doesn't touch the checkboxes, so redraw the checklist on the way out.
+  onClose: () => renderPlan(),
+});
 
 let lastWidth = 0;
 function planWidth() {
@@ -688,6 +699,7 @@ function renderPlan() {
   applyFieldErrors(issues);
   applyHighlight();
   updateTabCount(issues);
+  shopMode.syncEntry();
 }
 
 function applyFieldErrors(issues) {

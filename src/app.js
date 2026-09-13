@@ -1,7 +1,8 @@
-import { planCuts, suggestStock, MAX_INSTANCES } from './planner.js';
+import { planCuts, recommendStock, MAX_INSTANCES } from './planner.js';
 import { lengthParts, formatLength } from './units.js';
 import * as store from './store.js';
 import { renderSheet, nounFor, svgEl } from './sheet-view.js';
+import { buildShopRows, shopRowsToCsv } from './shop-output.js';
 
 // Milk-paint colours, one per part row.
 const PALETTE = ['#E4A596', '#93AACB', '#AFC49A', '#EAAA6E', '#A7B2BA', '#92C4B8', '#BDAAD0', '#DDA3B6'];
@@ -40,14 +41,15 @@ function writeJSON(key, value) {
   try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* storage blocked or full: the app still works */ }
 }
 
-const prefs = { showCuts: true, ...readJSON(PREFS_KEY) };
+const prefs = { showCuts: true, purchaseObjective: 'cost', ...readJSON(PREFS_KEY) };
+if (!['cost', 'waste', 'sheetCount'].includes(prefs.purchaseObjective)) prefs.purchaseObjective = 'cost';
 const state = {
   project: null,
   firstRun: false,
   input: null,
   issues: [],
   plan: null,
-  suggestion: null,
+  recommendation: null,
   progress: { sig: '', done: new Set() },
   hover: null,
   pinned: null,
@@ -143,7 +145,7 @@ function renderRows(kind) {
 }
 
 function rowInput(kind, row, field, label) {
-  const sizeField = field === 'length' || field === 'width';
+  const sizeField = ['length', 'width', 'thickness', 'lengthAllowance', 'widthAllowance'].includes(field);
   return h('input', {
     class: `in in-${field}`,
     type: 'text',
@@ -152,7 +154,7 @@ function rowInput(kind, row, field, label) {
     autocomplete: 'off',
     spellcheck: 'false',
     enterkeyhint: 'next',
-    inputmode: field === 'qty' ? 'numeric' : sizeField && units() === 'mm' ? 'decimal' : null,
+    inputmode: field === 'qty' ? 'numeric' : field === 'price' || (sizeField && units() === 'mm') ? 'decimal' : null,
     maxlength: field === 'name' ? '80' : '24',
     placeholder: field === 'name' ? (kind === 'stock' ? 'Material, e.g. 3/4 plywood' : 'Part name') : null,
     dataset: { kind, id: row.id, field },
@@ -193,9 +195,43 @@ function rowEl(kind, row, i) {
     li.addEventListener('pointerenter', () => setHover(row.id));
     li.addEventListener('pointerleave', () => setHover(null));
   }
+  li.append(rowDetails(kind, row, who));
   // Last in tab order so Tab runs name, length, width, qty; CSS puts it top right.
   li.append(h('button', { type: 'button', class: 'icon-btn del', 'aria-label': `Remove ${who}`, title: 'Remove', onclick: () => removeRow(kind, row.id) }, iconEl(ICONS.remove)));
   return li;
+}
+
+function detailField(label, control, hint = '') {
+  return h('label', { class: 'detail-field' }, h('span', null, label), control,
+    hint ? h('small', null, hint) : null);
+}
+
+function rowDetails(kind, row, who) {
+  const isPart = kind === 'parts';
+  const fields = [
+    detailField('Thickness', rowInput(kind, row, 'thickness', `Thickness, ${who}`), 'Optional; matches parts to stock.'),
+  ];
+  if (isPart) {
+    fields.push(
+      detailField('Extra length', rowInput(kind, row, 'lengthAllowance', `Extra cut allowance along length, ${who}`)),
+      detailField('Extra width', rowInput(kind, row, 'widthAllowance', `Extra cut allowance along width, ${who}`)),
+    );
+    const edgeBand = h('select', {
+      class: 'in', 'aria-label': `Edges to band, ${who}`, value: row.edgeBand || 'none',
+      onchange: (e) => { row.edgeBand = e.target.value; changed(); },
+    },
+    h('option', { value: 'none' }, 'None'),
+    h('option', { value: 'length' }, 'Both length edges'),
+    h('option', { value: 'width' }, 'Both width edges'),
+    h('option', { value: 'all' }, 'All four edges'));
+    edgeBand.value = row.edgeBand || 'none';
+    fields.push(detailField('Edge banding', edgeBand));
+  } else {
+    fields.push(detailField('Price per piece', rowInput(kind, row, 'price', `Price per piece, ${who}`), 'Optional; use the same currency for every stock type.'));
+  }
+  return h('details', { class: 'row-details' },
+    h('summary', null, isPart ? 'Material & finishing' : 'Thickness & price'),
+    h('div', { class: 'detail-grid' }, fields));
 }
 
 function fillFrom(sel, row) {
@@ -216,7 +252,12 @@ function refreshFromSelects() {
 
 function focusField(kind, id, field) {
   const el = document.querySelector(`[data-kind="${kind}"][data-id="${id}"][data-field="${field}"]`);
-  if (el) { el.focus(); el.select(); }
+  if (el) {
+    const details = el.closest('details');
+    if (details) details.open = true;
+    el.focus();
+    el.select?.();
+  }
 }
 
 function onRowKey(e, kind, row, field) {
@@ -266,13 +307,13 @@ function runPlan() {
   state.input = input;
   state.issues = issues;
   state.plan = planCuts(input);
-  state.suggestion = state.plan.unplaced.some((u) => u.reason === 'no-stock') ? suggestStock(input, state.plan) : null;
+  state.recommendation = null;
 
   // Ticked-off cuts only make sense for the plan they were ticked on.
   const sig = JSON.stringify([
     input.kerf,
-    input.stock.map((s) => [s.id, s.length, s.width, s.qty]),
-    input.parts.map((p) => [p.id, p.length, p.width, p.qty, p.grain, p.from]),
+    input.stock.map((s) => [s.id, s.length, s.width, s.thickness, s.qty]),
+    input.parts.map((p) => [p.id, p.length, p.width, p.thickness, p.lengthAllowance, p.widthAllowance, p.edgeBand, p.qty, p.grain, p.from]),
   ]);
   if (sig !== state.progress.sig) {
     state.progress = { sig, done: new Set() };
@@ -288,15 +329,19 @@ function visibleIssues() {
   return state.issues.filter((i) => !(typing && i.id === typing.id && i.fields.includes(typing.field)));
 }
 
-const FIELD_NAMES = { length: 'length', width: 'width', qty: 'quantity', kerf: 'blade kerf' };
+const FIELD_NAMES = {
+  length: 'length', width: 'width', thickness: 'thickness', lengthAllowance: 'extra length',
+  widthAllowance: 'extra width', price: 'price', qty: 'quantity', kerf: 'blade kerf',
+};
 const joinWords = (words) => (words.length > 1 ? `${words.slice(0, -1).join(', ')} and ${words.at(-1)}` : words[0]);
 
 function describeInvalid(issue) {
   if (issue.kind === 'settings') return units() === 'mm' ? 'use a size like 3 or 3.2' : 'use a size like 1/8 or 0.125';
-  const sizes = issue.fields.filter((f) => f !== 'qty');
+  const sizes = issue.fields.filter((f) => f !== 'qty' && f !== 'price');
   const parts = [];
   if (sizes.length) parts.push(`${joinWords(sizes.map((f) => FIELD_NAMES[f]))} should look like ${units() === 'mm' ? '600 or 600.5' : '23 5/8, 23.625 or 2\' 6"'}`);
-  if (issue.fields.includes('qty')) parts.push(`quantity must be a whole number from 1 to ${store.MAX_QTY}`);
+  if (issue.fields.includes('price')) parts.push('price must be zero or a positive decimal number');
+  if (issue.fields.includes('qty')) parts.push(`quantity must be a whole number from ${issue.kind === 'stock' ? 0 : 1} to ${store.MAX_QTY}`);
   return parts.join('; ');
 }
 
@@ -327,43 +372,98 @@ function issueNotices(issues) {
   return out;
 }
 
+const formatPrice = (value) => value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+function findPurchaseRecommendation() {
+  state.recommendation = recommendStock(state.input, state.plan, { objective: prefs.purchaseObjective });
+  if (!state.recommendation) toast('No listed stock size can resolve all of the remaining parts.');
+  renderPlan();
+}
+
+function applyRecommendedPurchase() {
+  const recommendation = state.recommendation;
+  if (!recommendation) return;
+  const count = recommendation.totalSheets;
+  withUndo(`Added ${count} purchased stock piece${count === 1 ? '' : 's'}.`, () => {
+    for (const purchase of recommendation.purchases) {
+      const row = state.project.stock.find((stock) => stock.id === purchase.stockId);
+      if (row) row.qty = String((parseInt(row.qty, 10) || 0) + purchase.qty);
+    }
+  });
+}
+
 function unplacedNotices() {
-  const { plan, suggestion, input } = state;
+  const { plan, recommendation, input } = state;
   const out = [];
   const short = plan.unplaced.filter((u) => u.reason === 'no-stock');
   const tooBig = plan.unplaced.filter((u) => u.reason === 'too-big');
+  const wrongThickness = plan.unplaced.filter((u) => u.reason === 'wrong-thickness');
 
   if (short.length) {
     const names = short.map((u) => (u.count > 1 ? `${u.name} ×${u.count}` : u.name));
     const box = h('div', { class: 'notice is-problem' }, h('p', null, `There isn’t enough stock for ${joinWords(names)}.`));
-    const row = suggestion && state.project.stock.find((s) => s.id === suggestion.stockId);
-    const stock = suggestion && input.stock.find((s) => s.id === suggestion.stockId);
-    if (row && stock) {
-      // "sheet of 3/4 plywood", never "1 3/4 plywood", which reads as a fraction.
-      const noun = nounFor(stock, units()).toLowerCase();
-      const what = `${suggestion.add} ${noun}${suggestion.add === 1 ? '' : 's'} of ${stock.name}`;
-      box.append(h('button', {
-        type: 'button', class: 'btn btn-dark',
-        onclick: () => withUndo(`Added ${what}.`, () => { row.qty = String((parseInt(row.qty, 10) || 0) + suggestion.add); }),
-      }, `Add ${suggestion.add} more ${noun}${suggestion.add === 1 ? '' : 's'} of ${stock.name}`));
+    const objective = h('select', {
+      class: 'in purchase-objective', 'aria-label': 'Purchase optimization goal', value: prefs.purchaseObjective,
+      onchange: (e) => {
+        prefs.purchaseObjective = e.target.value;
+        state.recommendation = null;
+        writeJSON(PREFS_KEY, prefs);
+        renderPlan();
+      },
+    },
+    h('option', { value: 'cost' }, 'Lowest cost'),
+    h('option', { value: 'waste' }, 'Least waste'),
+    h('option', { value: 'sheetCount' }, 'Fewest pieces'));
+    objective.value = prefs.purchaseObjective;
+    box.append(h('div', { class: 'purchase-tools' },
+      h('label', null, h('span', null, 'Optimize purchase'), objective),
+      h('button', { type: 'button', class: 'btn btn-dark', onclick: findPurchaseRecommendation }, recommendation ? 'Recalculate' : 'Find stock to buy')));
+    if (recommendation) {
+      const descriptions = recommendation.purchases.map((purchase) => {
+        const stock = input.stock.find((s) => s.id === purchase.stockId);
+        const noun = stock ? nounFor(stock, units()).toLowerCase() : 'piece';
+        return `${purchase.qty} ${noun}${purchase.qty === 1 ? '' : 's'} of ${purchase.stockName}`;
+      });
+      const details = [`${recommendation.totalSheets} piece${recommendation.totalSheets === 1 ? '' : 's'} total`];
+      if (recommendation.totalCost !== null) details.push(`${formatPrice(recommendation.totalCost)} total cost`);
+      details.push(`${Math.round(recommendation.waste * 100)}% extra purchased area`);
+      box.append(h('div', { class: 'purchase-result' },
+        h('p', null, h('strong', null, `Buy ${joinWords(descriptions)}.`), ` ${details.join(' · ')}.`),
+        !recommendation.priceComplete && prefs.purchaseObjective === 'cost'
+          ? h('p', { class: 'hint' }, 'One or more prices are blank, so material area was used as a fallback. Add prices under “Thickness & price” for a true cost comparison.')
+          : null,
+        h('button', { type: 'button', class: 'btn', onclick: applyRecommendedPurchase }, 'Add purchase to stock')));
     } else {
-      box.append(h('p', null, 'Add more stock or reduce the quantities.'));
+      box.append(h('p', { class: 'hint' }, 'This compares all listed stock sizes, including types with a quantity of zero.'));
     }
     out.push(box);
   }
 
   for (const u of tooBig) {
     const part = input.parts.find((p) => p.id === u.partId);
-    const allowed = input.stock.filter((s) => !part.from || s.id === part.from);
-    const turnFits = part.grain && allowed.some((s) => part.width <= s.length && part.length <= s.width);
+    const cutLength = u.cutLength ?? u.length;
+    const cutWidth = u.cutWidth ?? u.width;
+    const allowed = input.stock.filter((s) => (!part.from || s.id === part.from) &&
+      (part.thickness == null || (s.thickness != null && Math.abs(part.thickness - s.thickness) < 1e-6)));
+    const turnFits = part.grain && allowed.some((s) => cutWidth <= s.length && cutLength <= s.width);
     const box = h('div', { class: 'notice is-problem' },
-      h('p', null, `${u.name} (`, dimsEl(u.length, u.width), `) is bigger than any stock it can be cut from.`));
+      h('p', null, `${u.name} (`, dimsEl(cutLength, cutWidth), ` cut size) is bigger than any stock it can be cut from.`));
     if (turnFits) {
       const row = state.project.parts.find((p) => p.id === u.partId);
       box.append(
         h('p', null, 'It would fit if it could be turned so the grain runs across it.'),
         h('button', { type: 'button', class: 'btn', onclick: () => withUndo(`${u.name} can now be turned.`, () => { row.grain = false; }) }, 'Allow turning this part'));
     }
+    out.push(box);
+  }
+
+  for (const u of wrongThickness) {
+    const row = state.project.parts.find((p) => p.id === u.partId);
+    const box = h('div', { class: 'notice is-problem' },
+      h('p', null, `${u.name} needs `, lenEl(u.thickness), ` thick stock, but none of its allowed stock has that thickness.`));
+    if (row) box.append(h('button', {
+      type: 'button', class: 'btn', onclick: () => { setTab('setup'); focusField('parts', row.id, 'thickness'); },
+    }, 'Review thickness'));
     out.push(box);
   }
   return out;
@@ -430,15 +530,23 @@ function sheetEl(sheet, i, width) {
 
   const groups = new Map();
   for (const p of sheet.placements) {
-    const g = groups.get(p.partId) || { partId: p.partId, name: p.name, count: 0 };
+    const g = groups.get(p.partId) || { partId: p.partId, name: p.name, count: 0, placement: p };
     g.count += 1;
     groups.set(p.partId, g);
   }
   const partList = h('ul', { class: 'plist' }, [...groups.values()].map((g) => {
     const part = state.input.parts.find((p) => p.id === g.partId);
+    const details = [];
+    if ((part.lengthAllowance ?? 0) > 0 || (part.widthAllowance ?? 0) > 0) {
+      details.push(h('span', null, 'Cut ', dimsEl(part.length + (part.lengthAllowance ?? 0), part.width + (part.widthAllowance ?? 0))));
+    }
+    if (part.thickness != null) details.push(h('span', null, lenEl(part.thickness), ' thick'));
+    if (part.edgeBand && part.edgeBand !== 'none') details.push(h('span', null, edgeBandText(part.edgeBand)));
     const li = h('li', { dataset: { part: g.partId } },
       h('span', { class: 'badge', style: { '--c': colorOf(g.partId) }, 'aria-hidden': 'true' }, letterOf(g.partId)),
-      h('span', null, h('span', { class: 'name' }, g.name), ' ', dimsEl(part.length, part.width)),
+      h('span', null,
+        h('span', { class: 'name' }, g.name), ' ', dimsEl(part.length, part.width),
+        details.length ? h('span', { class: 'part-details' }, details) : null),
       h('span', { class: 'qty' }, `×${g.count}`));
     li.addEventListener('pointerenter', () => setHover(g.partId));
     li.addEventListener('pointerleave', () => setHover(null));
@@ -451,7 +559,8 @@ function sheetEl(sheet, i, width) {
   return h('article', { class: 'sheet', 'aria-labelledby': `sheet-h-${key}` },
     h('div', { class: 'sheet-head' },
       h('h3', { id: `sheet-h-${key}` }, title),
-      h('span', { class: 'sheet-meta' }, `${sheet.stockName}, `, dimsEl(sheet.length, sheet.width)),
+      h('span', { class: 'sheet-meta' }, `${sheet.stockName}, `, dimsEl(sheet.length, sheet.width),
+        sheet.thickness != null ? h('span', null, ' × ', lenEl(sheet.thickness), ' thick') : null),
       h('span', { class: 'sheet-yield' }, `${Math.round(sheet.yield * 100)}% used`)),
     h('figure', null, svg),
     h('div', { class: 'sheet-body' },
@@ -460,6 +569,10 @@ function sheetEl(sheet, i, width) {
         h('h4', null, 'Parts'), partList,
         keep.length ? h('div', { class: 'offcuts' }, h('h4', null, 'Offcuts worth keeping'),
           h('ul', null, keep.map((o) => h('li', null, dimsEl(o.l, o.w))))) : null)));
+}
+
+function edgeBandText(mode) {
+  return ({ length: 'Band length edges', width: 'Band width edges', all: 'Band all edges' })[mode] || '';
 }
 
 function stepEl(c, cutKey) {
@@ -583,6 +696,66 @@ function setTab(tab) {
 
 const slug = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 60);
 
+function shopRows() {
+  // A pending input debounce should never make a printed/exported plan stale.
+  clearTimeout(planTimer);
+  runPlan();
+  renderPlan();
+  return buildShopRows(state.project.name, units(), state.input.parts, state.plan, store.letterFor);
+}
+
+function printPlan() {
+  delete document.body.dataset.printMode;
+  window.print();
+}
+
+function labelEl(row) {
+  const location = row.status === 'Placed'
+    ? `Sheet ${row.sheet} · ${row.stock}`
+    : row.status;
+  const hasAllowance = row.cutLength !== row.length || row.cutWidth !== row.width;
+  const notes = [];
+  if (row.thickness !== '') notes.push(h('span', null, lenEl(row.thickness), ' thick'));
+  if (row.edgeBand !== 'none') notes.push(h('span', null, edgeBandText(row.edgeBand)));
+  return h('article', { class: `part-label${row.status === 'Placed' ? '' : ' is-unplaced'}` },
+    h('p', { class: 'label-project' }, row.project),
+    h('div', { class: 'label-part' },
+      h('span', { class: 'label-letter', style: { '--c': colorOf(row.partId) } }, row.letter),
+      h('h2', null, row.name)),
+    h('div', { class: 'label-dims' },
+      h('p', null, hasAllowance ? 'Finished ' : '', dimsEl(row.length, row.width), h('span', { class: 'label-unit' }, unitMark())),
+      hasAllowance ? h('p', { class: 'label-cut-size' }, 'Cut ', dimsEl(row.cutLength, row.cutWidth), h('span', { class: 'label-unit' }, unitMark())) : null),
+    h('div', { class: 'label-meta' },
+      h('p', null, `Part ${row.instance} of ${row.quantity}`),
+      h('p', null, row.grain === 'Along length' ? 'Grain → length' : 'Grain unrestricted')),
+    notes.length ? h('p', { class: 'label-notes' }, notes) : null,
+    h('p', { class: 'label-location' }, location));
+}
+
+function printLabels() {
+  const rows = shopRows();
+  if (!rows.length) { toast('Add at least one complete part before printing labels.'); return; }
+  $('#part-labels').replaceChildren(
+    h('header', { class: 'labels-head' }, h('h1', null, `${state.project.name} · Part labels`), h('p', null, `${rows.length} label${rows.length === 1 ? '' : 's'}`)),
+    h('div', { class: 'label-grid' }, rows.map(labelEl)));
+  document.body.dataset.printMode = 'labels';
+  // Let the browser lay out the newly-created label grid before opening preview.
+  requestAnimationFrame(() => requestAnimationFrame(() => window.print()));
+}
+
+function exportCsv() {
+  const rows = shopRows();
+  if (!rows.length) { toast('Add at least one complete part before exporting.'); return; }
+  const blob = new Blob(['\uFEFF', shopRowsToCsv(rows)], { type: 'text/csv;charset=utf-8' });
+  const a = h('a', { href: URL.createObjectURL(blob), download: `${slug(state.project.name) || 'cut-plan'}-parts.csv` });
+  document.body.append(a);
+  a.click();
+  const url = a.href;
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  toast(`Exported ${rows.length} part${rows.length === 1 ? '' : 's'} to CSV.`);
+}
+
 async function shareLink() {
   let url;
   try {
@@ -614,7 +787,9 @@ function saveFile() {
 
 const commands = {
   share: shareLink,
-  print: () => window.print(),
+  print: printPlan,
+  labels: printLabels,
+  csv: exportCsv,
   new: () => {
     withUndo('Started a new project.', () => { state.project = store.blankProject(units()); state.firstRun = false; });
     setTab('setup');
@@ -660,7 +835,7 @@ function bindChrome() {
   showCuts.addEventListener('change', () => { prefs.showCuts = showCuts.checked; writeJSON(PREFS_KEY, prefs); renderPlan(); });
 
   $('#share-btn').addEventListener('click', shareLink);
-  $('#print-btn').addEventListener('click', () => window.print());
+  $('#print-btn').addEventListener('click', printPlan);
 
   const menuBtn = $('#menu-btn');
   const menu = $('#menu');
@@ -708,6 +883,7 @@ function bindChrome() {
   }).observe($('#plan-body'));
 
   window.addEventListener('pagehide', () => { clearTimeout(saveTimer); writeJSON(store.STORAGE_KEY, state.project); });
+  window.addEventListener('afterprint', () => { delete document.body.dataset.printMode; });
 }
 
 // ---------------------------------------------------------------- start

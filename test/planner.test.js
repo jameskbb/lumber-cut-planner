@@ -29,10 +29,13 @@ function assertBuildable(result, input) {
       const part = input.parts.find((x) => x.id === p.partId);
       assert.ok(p.x >= -EPS && p.y >= -EPS, 'inside sheet');
       assert.ok(p.x + p.l <= sheet.length + EPS && p.y + p.w <= sheet.width + EPS, 'inside sheet');
-      const dims = p.rotated ? [part.width, part.length] : [part.length, part.width];
+      const cutLength = part.length + (part.lengthAllowance ?? 0);
+      const cutWidth = part.width + (part.widthAllowance ?? 0);
+      const dims = p.rotated ? [cutWidth, cutLength] : [cutLength, cutWidth];
       assert.ok(Math.abs(p.l - dims[0]) < EPS && Math.abs(p.w - dims[1]) < EPS, 'correct size');
       if (part.grain) assert.equal(p.rotated, false, 'grain-locked part not rotated');
       if (part.from) assert.equal(sheet.stockId, part.from, 'part cut from its chosen stock');
+      if (part.thickness != null) assert.ok(Math.abs(part.thickness - stock.thickness) <= EPS, 'part uses matching thickness');
     }
 
     for (let i = 0; i < ps.length; i++) {
@@ -117,6 +120,86 @@ test('parts tied to a stock are only cut from it', () => {
   const r = planCuts(input);
   assertBuildable(r, input);
   assert.equal(r.sheets.length, 2);
+});
+
+test('specified part thickness only uses matching stock', () => {
+  const input = {
+    kerf: 0,
+    stock: [
+      { id: 'thin', name: 'Thin', length: 48, width: 24, thickness: 0.25, qty: 1 },
+      { id: 'thick', name: 'Thick', length: 48, width: 24, thickness: 0.75, qty: 1 },
+      { id: 'legacy', name: 'Unspecified', length: 48, width: 24, qty: 1 },
+    ],
+    parts: [{ id: 'p', name: 'Side', length: 20, width: 10, thickness: 0.75, qty: 1 }],
+  };
+  const r = planCuts(input);
+  assertBuildable(r, input);
+  assert.equal(r.sheets.length, 1);
+  assert.equal(r.sheets[0].stockId, 'thick');
+  assert.equal(r.sheets[0].thickness, 0.75);
+});
+
+test('thickness comparison tolerates floating point noise and reports mismatches', () => {
+  const base = {
+    kerf: 0,
+    stock: [{ id: 's', name: 'S', length: 48, width: 24, thickness: 0.75, qty: 1 }],
+  };
+  const close = planCuts({
+    ...base,
+    parts: [{ id: 'p', name: 'P', length: 12, width: 6, thickness: 0.7500005, qty: 1 }],
+  });
+  assert.equal(close.unplaced.length, 0);
+
+  const mismatch = planCuts({
+    ...base,
+    parts: [{ id: 'p', name: 'P', length: 12, width: 6, thickness: 0.5, qty: 1 }],
+  });
+  assert.equal(mismatch.stats.partsPlaced, 0);
+  assert.equal(mismatch.unplaced[0].reason, 'wrong-thickness');
+  assert.equal(suggestStock({ ...base, parts: [{ id: 'p', name: 'P', length: 12, width: 6, thickness: 0.5, qty: 1 }] }, mismatch), null);
+});
+
+test('parts without a thickness remain compatible with all stock', () => {
+  const input = {
+    kerf: 0,
+    stock: [{ id: 's', name: 'S', length: 24, width: 12, thickness: 0.75, qty: 1 }],
+    parts: [{ id: 'p', name: 'Legacy part', length: 12, width: 6, qty: 1 }],
+  };
+  assert.equal(planCuts(input).unplaced.length, 0);
+});
+
+test('allowances enlarge cut geometry and placement retains finished metadata', () => {
+  const input = {
+    kerf: 0,
+    stock: [{ id: 's', name: 'S', length: 20, width: 10, thickness: 0.75, qty: 1 }],
+    parts: [{
+      id: 'p', name: 'Door', length: 19, width: 9, thickness: 0.75, qty: 1,
+      lengthAllowance: 1, widthAllowance: 1, edgeBand: 'all',
+    }],
+  };
+  const r = planCuts(input);
+  assertBuildable(r, input);
+  assert.equal(r.sheets[0].cuts.length, 0);
+  assert.deepEqual(r.sheets[0].placements[0], {
+    partId: 'p', name: 'Door', n: 1,
+    x: 0, y: 0, l: 20, w: 10, rotated: false,
+    finishedLength: 19, finishedWidth: 9,
+    cutLength: 20, cutWidth: 10,
+    lengthAllowance: 1, widthAllowance: 1,
+    thickness: 0.75, edgeBand: 'all',
+  });
+});
+
+test('allowances can make an otherwise fitting part too large', () => {
+  const input = {
+    kerf: 0,
+    stock: [{ id: 's', name: 'S', length: 20, width: 10, qty: 1 }],
+    parts: [{ id: 'p', name: 'P', length: 20, width: 10, lengthAllowance: 0.25, qty: 1 }],
+  };
+  const r = planCuts(input);
+  assert.equal(r.unplaced[0].reason, 'too-big');
+  assert.equal(r.unplaced[0].length, 20);
+  assert.equal(r.unplaced[0].cutLength, 20.25);
 });
 
 test('random projects always produce buildable plans', () => {

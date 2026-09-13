@@ -1,6 +1,6 @@
 // Offline support. Network first, so a deployed update is picked up straight
 // away; the cached copy is used only when there's no connection.
-const CACHE = 'lumber-cut-planner-v1';
+const CACHE = 'lumber-cut-planner-v2';
 const SHELL = [
   './',
   'index.html',
@@ -10,6 +10,7 @@ const SHELL = [
   'src/units.js',
   'src/store.js',
   'src/sheet-view.js',
+  'src/shop-output.js',
   'fonts/archivo-wdth.woff2',
   'icons/icon.svg',
   'manifest.webmanifest',

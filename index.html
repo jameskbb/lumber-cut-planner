@@ -39,6 +39,8 @@
         <div class="menu" id="menu" hidden>
           <button type="button" data-cmd="share" class="narrow-only">Share link</button>
           <button type="button" data-cmd="print" class="narrow-only">Print</button>
+          <button type="button" data-cmd="labels">Print part labels…</button>
+          <button type="button" data-cmd="csv">Export parts &amp; plan (.csv)</button>
           <button type="button" data-cmd="new">New project</button>
           <button type="button" data-cmd="open">Open file…</button>
           <button type="button" data-cmd="save">Save to file</button>
@@ -53,7 +55,7 @@
       <section class="block" aria-labelledby="stock-h">
         <div class="block-head">
           <h2 id="stock-h">Stock</h2>
-          <p class="hint">Sheets and boards you have to cut from.</p>
+          <p class="hint">Sheets and boards you have to cut from. Use quantity 0 to list a size you could buy.</p>
         </div>
         <div class="cols" aria-hidden="true"><span></span><span>Length</span><span>Width</span><span>Qty</span></div>
         <ul class="rows" id="stock-list"></ul>
@@ -105,6 +107,7 @@
   </nav>
 
   <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+  <section class="label-print" id="part-labels" aria-hidden="true"></section>
   <input type="file" id="file-input" accept=".json,application/json" hidden>
   <noscript><p class="noscript">Lumber Cut Planner needs JavaScript to plan cuts.</p></noscript>
 </body>

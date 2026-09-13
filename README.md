@@ -22,11 +22,12 @@ Open the app on first visit and it shows an example bookcase already laid out, s
 - **Real saw cuts.** Every cut runs edge to edge (guillotine cuts), so the plan works on a table saw or track saw. The blade kerf is taken out between parts.
 - **Cut order with checkboxes.** Each sheet gets numbered rip and crosscut steps. Ticked cuts are remembered when you come back.
 - **Grain direction.** Keep a part's length along the grain, or let the planner turn it for a better fit.
-- **Mixed materials.** List several kinds of stock and choose which one each part is cut from, like ¾" plywood for the carcass and ¼" for the back.
-- **Help when it doesn't fit.** Parts that don't fit are listed with the reason, and the app says how many more sheets to buy. Adding them is one click.
+- **Mixed materials.** Give stock and parts an optional thickness, or choose exactly which stock a part must use, so ¾" carcass parts stay separate from a ¼" back.
+- **Purchase optimizer.** Compare the stock sizes you could buy and optimize for cost, waste, or piece count. Mixed-size purchases and stock types with zero currently on hand are supported.
+- **Finishing details.** Add trim allowances in either direction and record which edges need banding. The diagram uses the larger cut size while labels retain the finished size.
 - **Sizes the way woodworkers write them.** `23 5/8`, `23-5/8`, `23.625`, `2' 6"` or `600mm` all work. Switch between inches and millimetres at any time.
 - **Save and share.** Projects save automatically in your browser. You can also save to a file, open one, or share a link that carries the whole project.
-- **Print.** One page per sheet, with the diagram and a paper checklist.
+- **Shop output.** Print one page per sheet with a paper checklist, print individual part labels, or export the parts and placements as CSV.
 - **Phone friendly.** Add it to your home screen and it opens like an app.
 
 ## Privacy
@@ -61,6 +62,7 @@ Tests use Node's built-in runner. They cover size parsing and formatting, projec
 | `src/units.js` | Parses and formats lengths (fractions, feet and inches, metric). |
 | `src/store.js` | Project defaults, validation of files and links, share-link encoding. |
 | `src/sheet-view.js` | Draws a sheet as SVG. |
+| `src/shop-output.js` | Builds per-part label and CSV export data. |
 | `src/app.js` | The interface. |
 | `sw.js`, `manifest.webmanifest` | Offline support and home-screen install. |
 

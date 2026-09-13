@@ -25,11 +25,14 @@ export function letterFor(index) {
 }
 
 export function blankStock() {
-  return { id: newId(), name: '', length: '', width: '', qty: '1' };
+  return { id: newId(), name: '', length: '', width: '', thickness: '', qty: '1', price: '' };
 }
 
 export function blankPart() {
-  return { id: newId(), name: '', length: '', width: '', qty: '1', grain: false, from: '' };
+  return {
+    id: newId(), name: '', length: '', width: '', thickness: '', qty: '1',
+    grain: false, from: '', lengthAllowance: '', widthAllowance: '', edgeBand: 'none',
+  };
 }
 
 export function blankProject(units = 'in') {
@@ -39,7 +42,10 @@ export function blankProject(units = 'in') {
     name: 'Untitled project',
     units,
     kerf: metric ? '3' : '1/8',
-    stock: [{ id: newId(), name: 'Plywood', length: metric ? '2440' : '96', width: metric ? '1220' : '48', qty: '1' }],
+    stock: [{
+      id: newId(), name: 'Plywood', length: metric ? '2440' : '96', width: metric ? '1220' : '48',
+      thickness: '', qty: '1', price: '',
+    }],
     parts: [blankPart()],
   };
 }
@@ -69,6 +75,7 @@ export function exampleProject() {
 }
 
 const text = (v, max) => (typeof v === 'string' || typeof v === 'number' ? String(v).slice(0, max) : '');
+const EDGE_BANDS = new Set(['none', 'length', 'width', 'all']);
 
 /** Validates anything read from a file or link. Throws with a readable message. */
 export function sanitizeProject(raw) {
@@ -87,7 +94,9 @@ export function sanitizeProject(raw) {
     name: text(r.name, LIMITS.name),
     length: text(r.length, LIMITS.value),
     width: text(r.width, LIMITS.value),
+    thickness: text(r.thickness, LIMITS.value),
     qty: text(r.qty ?? '1', LIMITS.value),
+    price: text(r.price, LIMITS.value),
   }));
   const stockIds = new Set(stock.map((s) => s.id));
   const parts = raw.parts.slice(0, LIMITS.rows).filter((r) => r && typeof r === 'object').map((r) => ({
@@ -95,9 +104,13 @@ export function sanitizeProject(raw) {
     name: text(r.name, LIMITS.name),
     length: text(r.length, LIMITS.value),
     width: text(r.width, LIMITS.value),
+    thickness: text(r.thickness, LIMITS.value),
     qty: text(r.qty ?? '1', LIMITS.value),
     grain: r.grain === true,
     from: stockIds.has(r.from) ? r.from : '',
+    lengthAllowance: text(r.lengthAllowance, LIMITS.value),
+    widthAllowance: text(r.widthAllowance, LIMITS.value),
+    edgeBand: EDGE_BANDS.has(r.edgeBand) ? r.edgeBand : 'none',
   }));
   return {
     v: 1,
@@ -109,7 +122,7 @@ export function sanitizeProject(raw) {
   };
 }
 
-function readRow(row, units, withQty = true) {
+function readRow(row, units, withQty = true, minQty = 1) {
   const values = {};
   const invalid = [];
   const missing = [];
@@ -122,13 +135,37 @@ function readRow(row, units, withQty = true) {
   if (withQty) {
     const t = String(row.qty ?? '').trim();
     if (!t) missing.push('qty');
-    else if (!/^\d+$/.test(t) || +t < 1 || +t > MAX_QTY) invalid.push('qty');
+    else if (!/^\d+$/.test(t) || +t < minQty || +t > MAX_QTY) invalid.push('qty');
     else values.qty = +t;
   }
   return { values, invalid, missing };
 }
 
-const isBlank = (row) => !String(row.name ?? '').trim() && !String(row.length ?? '').trim() && !String(row.width ?? '').trim();
+function readOptionalLengths(row, units, fields) {
+  const values = {};
+  const invalid = [];
+  for (const [field, allowZero] of fields) {
+    const t = String(row[field] ?? '').trim();
+    if (!t) continue;
+    const v = parseLength(t, units);
+    if (v === null || (allowZero ? v < 0 : !(v > 0))) invalid.push(field);
+    else values[field] = v;
+  }
+  return { values, invalid };
+}
+
+function readOptionalPrice(row) {
+  const t = String(row.price ?? '').trim();
+  if (!t) return { values: {}, invalid: [] };
+  const price = Number(t);
+  return Number.isFinite(price) && price >= 0
+    ? { values: { price }, invalid: [] }
+    : { values: {}, invalid: ['price'] };
+}
+
+const isBlank = (row) =>
+  !['name', 'length', 'width', 'thickness', 'price', 'lengthAllowance', 'widthAllowance'].some((field) => String(row[field] ?? '').trim()) &&
+  (!row.edgeBand || row.edgeBand === 'none');
 
 /**
  * Converts a project into planner input. Rows with problems are left out and
@@ -143,7 +180,12 @@ export function toPlanInput(project) {
   project.stock.forEach((row, index) => {
     if (isBlank(row)) return;
     const label = row.name.trim() || `Stock ${index + 1}`;
-    const { values, invalid, missing } = readRow(row, units);
+    const { values, invalid, missing } = readRow(row, units, true, 0);
+    const optional = readOptionalLengths(row, units, [['thickness', false]]);
+    const price = readOptionalPrice(row);
+    Object.assign(values, optional.values);
+    Object.assign(values, price.values);
+    invalid.push(...optional.invalid, ...price.invalid);
     if (invalid.length) issues.push({ kind: 'stock', id: row.id, index, label, type: 'invalid', fields: invalid });
     else if (missing.length) issues.push({ kind: 'stock', id: row.id, index, label, type: 'incomplete', fields: missing });
     else stock.push({ id: row.id, name: label, ...values });
@@ -153,9 +195,17 @@ export function toPlanInput(project) {
     if (isBlank(row)) return;
     const label = row.name.trim() || `Part ${letterFor(index)}`;
     const { values, invalid, missing } = readRow(row, units);
+    const optional = readOptionalLengths(row, units, [
+      ['thickness', false], ['lengthAllowance', true], ['widthAllowance', true],
+    ]);
+    Object.assign(values, optional.values);
+    invalid.push(...optional.invalid);
     if (invalid.length) issues.push({ kind: 'part', id: row.id, index, label, type: 'invalid', fields: invalid });
     else if (missing.length) issues.push({ kind: 'part', id: row.id, index, label, type: 'incomplete', fields: missing });
-    else parts.push({ id: row.id, name: label, ...values, grain: !!row.grain, from: row.from || null });
+    else parts.push({
+      id: row.id, name: label, ...values, grain: !!row.grain, from: row.from || null,
+      edgeBand: EDGE_BANDS.has(row.edgeBand) ? row.edgeBand : 'none',
+    });
   });
 
   let kerf = 0;
@@ -181,8 +231,17 @@ export function convertProjectUnits(project, to) {
     ...project,
     units: to,
     kerf: conv(project.kerf),
-    stock: project.stock.map((r) => ({ ...r, length: conv(r.length), width: conv(r.width) })),
-    parts: project.parts.map((r) => ({ ...r, length: conv(r.length), width: conv(r.width) })),
+    stock: project.stock.map((r) => ({
+      ...r, length: conv(r.length), width: conv(r.width), thickness: conv(r.thickness),
+    })),
+    parts: project.parts.map((r) => ({
+      ...r,
+      length: conv(r.length),
+      width: conv(r.width),
+      thickness: conv(r.thickness),
+      lengthAllowance: conv(r.lengthAllowance),
+      widthAllowance: conv(r.widthAllowance),
+    })),
   };
 }
 

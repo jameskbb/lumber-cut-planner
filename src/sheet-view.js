@@ -100,6 +100,10 @@ function partLabel(g, p, px, units, letter) {
 /**
  * @param sheet one entry of planCuts().sheets
  * @param opt {width, maxHeight, units, colorOf(partId), letterOf(partId), done:Set, showCuts, key, label}
+ *   Optional: `view` {x, y, l, w} shows only that part of the sheet, scaled to
+ *   fit width × maxHeight (a view touching the top or left edge keeps its
+ *   ruler); `focus` [{x, y, l, w}] fades everything outside those pieces;
+ *   `id` names the SVG patterns when the same sheet is drawn twice.
  */
 export function renderSheet(sheet, opt) {
   const { units, colorOf, letterOf, done, showCuts, key } = opt;
@@ -107,18 +111,29 @@ export function renderSheet(sheet, opt) {
   const GAP = 3;
   const PAD = 4;
   const off = R + GAP;
+  const view = opt.view;
   let scale = (opt.width - off - PAD) / sheet.length;
   scale = Math.max(0.5, Math.min(scale, ((opt.maxHeight || 640) - off - PAD) / sheet.width));
+  // No 0.5 floor here: a whole metre-sized sheet on a phone needs less than that.
+  if (view) scale = Math.max(0.01, Math.min((opt.width - off - PAD) / view.l, ((opt.maxHeight || 640) - off - PAD) / view.w));
   const W = sheet.length * scale;
   const H = sheet.width * scale;
   const vbW = off + W + PAD;
   const vbH = off + H + PAD;
+  let vb = [0, 0, vbW, vbH];
+  if (view) {
+    const x0 = view.x <= 1e-6 ? 0 : off + view.x * scale;
+    const y0 = view.y <= 1e-6 ? 0 : off + view.y * scale;
+    const x1 = view.x + view.l >= sheet.length - 1e-6 ? vbW : off + (view.x + view.l) * scale;
+    const y1 = view.y + view.w >= sheet.width - 1e-6 ? vbH : off + (view.y + view.w) * scale;
+    vb = [x0, y0, x1 - x0, y1 - y0];
+  }
 
   const svg = svgEl('svg', {
-    viewBox: `0 0 ${vbW.toFixed(1)} ${vbH.toFixed(1)}`, width: vbW.toFixed(1), height: vbH.toFixed(1),
+    viewBox: vb.map((v) => v.toFixed(1)).join(' '), width: vb[2].toFixed(1), height: vb[3].toFixed(1),
     role: 'img', 'aria-label': opt.label, class: 'sheet-svg',
   });
-  const id = `sv${key}`;
+  const id = opt.id || `sv${key}`;
   svg.append(svgEl('defs', {},
     svgEl('pattern', { id: `${id}-grain`, width: 260, height: 12, patternUnits: 'userSpaceOnUse' },
       svgEl('path', { d: 'M0 3 C70 1 150 6 260 3 M0 8.5 C90 11 170 6.5 260 9', class: 'sv-grain' })),
@@ -154,6 +169,14 @@ export function renderSheet(sheet, opt) {
     pg.append(svgEl('rect', { x, y, width: w, height: h, fill: colorOf(p.partId) }));
     partLabel(pg, p, [x, y, w, h], units, letterOf(p.partId));
     g.append(pg);
+  }
+
+  if (opt.focus?.length) {
+    const hole = (r) => `M${r.x * scale} ${r.y * scale}h${r.l * scale}v${r.w * scale}h${-r.l * scale}z`;
+    g.append(svgEl('path', { d: `M0 0H${W}V${H}H0z${opt.focus.map(hole).join('')}`, 'fill-rule': 'evenodd', class: 'sv-fade', 'aria-hidden': 'true' }));
+    for (const r of opt.focus) {
+      g.append(svgEl('rect', { x: r.x * scale, y: r.y * scale, width: r.l * scale, height: r.w * scale, class: 'sv-focus', 'aria-hidden': 'true' }));
+    }
   }
 
   const band = Math.max(sheet.kerf * scale, 1.25);

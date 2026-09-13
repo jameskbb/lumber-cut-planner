@@ -5,6 +5,7 @@ import { renderSheet, nounFor, svgEl } from './sheet-view.js';
 import { buildShopRows, shopRowsToCsv } from './shop-output.js';
 import { createProjects, webStorageAdapter } from './projects.js';
 import { createProjectList } from './project-list.js';
+import { initPasteCutList } from './paste-cut-list.js';
 
 // Milk-paint colours, one per part row.
 const PALETTE = ['#E4A596', '#93AACB', '#AFC49A', '#EAAA6E', '#A7B2BA', '#92C4B8', '#BDAAD0', '#DDA3B6'];
@@ -1013,6 +1014,7 @@ function bindChrome() {
 
   $('#add-stock').addEventListener('click', () => addRow('stock'));
   $('#add-part').addEventListener('click', () => addRow('parts'));
+  initPasteCutList({ h, lenEl, withUndo, palette: PALETTE, state, button: $('#paste-parts') });
 
   const kerf = $('#kerf');
   kerf.dataset.field = 'kerf';

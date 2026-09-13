@@ -13,6 +13,8 @@ const SHELL = [
   'src/shop-output.js',
   'src/projects.js',
   'src/project-list.js',
+  'src/cut-list-import.js',
+  'src/paste-cut-list.js',
   'fonts/archivo-wdth.woff2',
   'icons/icon.svg',
   'manifest.webmanifest',

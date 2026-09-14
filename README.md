@@ -21,12 +21,15 @@ Open the app on first visit and it shows an example bookcase already laid out, s
 - **Live layout.** The plan redraws as you type.
 - **Real saw cuts.** Every cut runs edge to edge (guillotine cuts), so the plan works on a table saw or track saw. The blade kerf is taken out between parts.
 - **Cut order with checkboxes.** Each sheet gets numbered rip and crosscut steps. Ticked cuts are remembered when you come back.
+- **Shop mode.** Press Start cutting for a full-screen view to use at the saw. It shows one cut at a time in large type, with the diagram zoomed to the piece you're cutting. Cuts that share a fence setting are grouped into one step, but never before the piece they cut exists. The screen stays awake, and Done ticks the same checklist as the plan.
+- **Paste a cut list.** Paste parts from a spreadsheet, a CSV, a SketchUp or Fusion 360 cut-list export, or a plain `Side, 36, 11 1/4, 2` list. You see a preview, and lines that can't be read are marked with the reason before anything is added.
 - **Grain direction.** Keep a part's length along the grain, or let the planner turn it for a better fit.
 - **Mixed materials.** Give stock and parts an optional thickness, or choose exactly which stock a part must use, so ¾" carcass parts stay separate from a ¼" back.
 - **Purchase optimizer.** Compare the stock sizes you could buy and optimize for cost, waste, or piece count. Mixed-size purchases and stock types with zero currently on hand are supported.
 - **Finishing details.** Add trim allowances in either direction and record which edges need banding. The diagram uses the larger cut size while labels retain the finished size.
 - **Sizes the way woodworkers write them.** `23 5/8`, `23-5/8`, `23.625`, `2' 6"` or `600mm` all work. Switch between inches and millimetres at any time.
-- **Save and share.** Projects save automatically in your browser. You can also save to a file, open one, or share a link that carries the whole project.
+- **Several projects.** Projects save automatically in your browser, each with its own ticked cuts. Switch between them, or duplicate, rename or delete them, from **Project → Your projects**.
+- **Save and share.** Save a project to a file, open one, or share a link that carries the whole project.
 - **Shop output.** Print one page per sheet with a paper checklist, print individual part labels, or export the parts and placements as CSV.
 - **Phone friendly.** Add it to your home screen and it opens like an app.
 
@@ -54,7 +57,15 @@ To host your own copy, fork the repo and turn on GitHub Pages (**Settings → Pa
 npm test
 ```
 
-Tests use Node's built-in runner. They cover size parsing and formatting, project validation and share links, and check that random projects always produce plans that can really be built: parts inside the sheet, at least a kerf apart, grain respected, and no saw cut passing through a part.
+Tests use Node's built-in runner. They cover:
+
+- size parsing and formatting;
+- project validation and share links;
+- cut-list import;
+- saved projects and moving data over from older versions;
+- shop-mode steps.
+
+They also check that random projects always produce plans that can really be built: parts inside the sheet, at least a kerf apart, grain respected, no saw cut passing through a part, and no shop-mode step cutting a piece that hasn't been made yet.
 
 | Path | What it does |
 | --- | --- |
@@ -63,6 +74,11 @@ Tests use Node's built-in runner. They cover size parsing and formatting, projec
 | `src/store.js` | Project defaults, validation of files and links, share-link encoding. |
 | `src/sheet-view.js` | Draws a sheet as SVG. |
 | `src/shop-output.js` | Builds per-part label and CSV export data. |
+| `src/shop-steps.js` | Turns the cut order into shop-mode steps, grouping cuts that share a fence setting. |
+| `src/cut-list-import.js` | Reads pasted or opened cut lists into parts. |
+| `src/projects.js` | Saved projects and their ticked cuts, behind a small storage adapter. |
+| `src/shop-mode.js`, `src/paste-cut-list.js`, `src/project-list.js` | The shop mode, paste and project list interfaces. |
+| `src/back-gesture.js` | Lets the phone's back gesture close full-screen views. |
 | `src/app.js` | The interface. |
 | `sw.js`, `manifest.webmanifest` | Offline support and home-screen install. |
 

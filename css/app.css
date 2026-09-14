@@ -348,6 +348,7 @@ input[type="checkbox"] { width: 1.125rem; height: 1.125rem; margin: 0; accent-co
 
 .empty { padding: 2rem 0; max-width: 34rem; }
 .empty p { font-size: 1.125rem; margin-bottom: 1rem; }
+.empty .actions-row { display: flex; flex-wrap: wrap; gap: 0.5rem; }
 
 .sheet { margin: 1.5rem 0 2.75rem; }
 .sheet-head { display: flex; align-items: baseline; gap: 0.25rem 0.75rem; flex-wrap: wrap; }

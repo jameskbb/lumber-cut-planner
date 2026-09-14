@@ -50,9 +50,36 @@ function detectDelimiter(text) {
   return ',';
 }
 
+// A quoted CSV field is never this long in a cut list; past it, the quote is literal.
+const QUOTED_MAX = 4000;
+
+// The field that starts with the double quote at `i`, if it's really quoted
+// CSV: the first quote that isn't doubled ("" is a literal quote) must close
+// it, followed only by spaces and then the delimiter or the end of the line.
+// A field that spans lines must also not end in a digit, because 6" there is
+// far more likely an inch mark than the end of a quoted cell. Returns
+// {content, next} or null, and null means the opening quote is literal.
+function quotedField(text, i, delim) {
+  const n = text.length;
+  const limit = Math.min(n, i + 1 + QUOTED_MAX);
+  let content = '';
+  let j = i + 1;
+  while (j < limit) {
+    if (text[j] !== '"') { content += text[j++]; continue; }
+    if (text[j + 1] === '"') { content += '"'; j += 2; continue; }
+    let k = j + 1;
+    while (k < n && (text[k] === ' ' || text[k] === '\t') && text[k] !== delim) k++;
+    const after = text[k];
+    if (!(k >= n || after === delim || after === '\n' || after === '\r')) return null;
+    if (/[\r\n]/.test(content) && /\d\s*$/.test(content)) return null;
+    return { content, next: k };
+  }
+  return null;
+}
+
 // Splits text into records of fields. A field that starts with a double quote
-// is quoted CSV ("" is a literal quote, and it may span lines); a quote
-// anywhere else is literal, so inch marks like 2' 6" survive unquoted.
+// is quoted CSV when quotedField() says so, and then it may span lines; any
+// other quote is literal, so inch marks like 2' 6" survive unquoted.
 function readRecords(text, delim) {
   const records = [];
   const n = text.length;
@@ -62,30 +89,23 @@ function readRecords(text, delim) {
   let start = 1;
   let from = 0;
   let i = 0;
+  let hadQuotes = false;
   const end = (at) => {
     fields.push(field);
-    records.push({ line: start, text: text.slice(from, at), fields });
+    records.push({ line: start, text: text.slice(from, at), fields, quoted: hadQuotes });
     fields = [];
     field = '';
+    hadQuotes = false;
   };
   while (i < n) {
     const c = text[i];
     if (c === '"' && !field.trim()) {
-      let j = i + 1;
-      let content = '';
-      let closed = false;
-      while (j < n) {
-        if (text[j] === '"') {
-          if (text[j + 1] === '"') { content += '"'; j += 2; continue; }
-          closed = true;
-          break;
-        }
-        content += text[j++];
-      }
-      if (closed) {
-        line += (content.match(/\r\n|\r|\n/g) || []).length;
-        field = content;
-        i = j + 1;
+      const quoted = quotedField(text, i, delim);
+      if (quoted) {
+        hadQuotes = true;
+        line += (quoted.content.match(/\r\n|\r|\n/g) || []).length;
+        field = quoted.content;
+        i = quoted.next;
         continue;
       }
     }
@@ -103,6 +123,13 @@ function readRecords(text, delim) {
   }
   if (from < n || fields.length) end(n);
   return records;
+}
+
+// Trimmed fields without the empty ones a line ends with.
+function tidy(fields) {
+  const out = fields.map((f) => f.trim());
+  while (out.length && !out[out.length - 1]) out.pop();
+  return out;
 }
 
 function readHeading(cell) {
@@ -134,8 +161,18 @@ function sizeExample(units) {
   return units === 'mm' ? '600 or 600.5' : '23 5/8, 23.625 or 2\' 6"';
 }
 
+// Fraction characters (11½, ¾, ⅝) become the "11 1/2" text the app reads.
+const FRACTIONS = {
+  '½': '1/2', '⅓': '1/3', '⅔': '2/3', '¼': '1/4', '¾': '3/4', '⅕': '1/5', '⅖': '2/5', '⅗': '3/5', '⅘': '4/5',
+  '⅙': '1/6', '⅚': '5/6', '⅐': '1/7', '⅛': '1/8', '⅜': '3/8', '⅝': '5/8', '⅞': '7/8', '⅑': '1/9', '⅒': '1/10',
+};
+const FRACTION_CHAR = new RegExp(`(\\d?)\\s*([${Object.keys(FRACTIONS).join('')}])`, 'gu');
+const plainFractions = (text) => text
+  .replace(FRACTION_CHAR, (_, whole, f) => `${whole ? `${whole} ` : ''}${FRACTIONS[f]}`)
+  .replace(/(\d)\s*⁄\s*(\d)/g, '$1/$2');
+
 function readSize(raw, unit, units, label) {
-  let text = String(raw ?? '').trim().replace(/^~\s*/, '');
+  let text = plainFractions(String(raw ?? '').trim().replace(/^~\s*/, ''));
   if (!text) return { missing: label };
   // A bare number under a heading like "Length (mm)" is in that unit.
   if (unit && unit !== units && /^[\d\s.,/-]+$/.test(text)) text += UNIT_SUFFIX[unit];
@@ -207,21 +244,24 @@ function readPart(fields, cols, units, delimited) {
   };
 }
 
+// Unreadable lines kept with their reasons; the rest are only counted, so a
+// huge paste of junk doesn't sit in memory.
+export const MAX_PROBLEMS = 1000;
+
 /**
  * Reads a cut list. `room` is how many more parts the project can take.
- * Returns {rows, parts, problems, leftOut, hasHeadings, delimiter}, where each
- * row is {line, text, part} or {line, text, reason} in the order of the input,
- * and leftOut counts readable parts past `room`.
+ * Returns {rows, parts, problems, unreadable, leftOut, hasHeadings, delimiter},
+ * where each row is {line, text, part} or {line, text, reason} in the order of
+ * the input. `problems` holds the first MAX_PROBLEMS unreadable lines and
+ * `unreadable` counts all of them; leftOut counts readable parts past `room`.
+ * Without headings, a part whose line has values after the quantity lists
+ * them in `part.extra`, since they're left out.
  */
 export function parseCutList(input, { units = 'in', room = MAX_PARTS } = {}) {
-  const text = String(input ?? '').replace(/^﻿/, '');
+  const text = String(input ?? '').replace(/^\uFEFF/, '');
   const delimiter = detectDelimiter(text);
   const records = readRecords(text, delimiter)
-    .map((r) => {
-      const fields = r.fields.map((f) => f.trim());
-      while (fields.length && !fields[fields.length - 1]) fields.pop();
-      return { ...r, fields };
-    })
+    .map((r) => ({ ...r, fields: tidy(r.fields) }))
     .filter((r) => r.fields.length);
 
   // Headings may follow a title line or two (SketchUp CutList writes "Project: ...").
@@ -236,16 +276,36 @@ export function parseCutList(input, { units = 'in', room = MAX_PARTS } = {}) {
   const rows = [];
   let taken = 0;
   let leftOut = 0;
+  let unreadable = 0;
   for (const record of records.slice(first)) {
     // Exports repeat the headings above each section; they aren't parts.
     if (headings && headingMap(record.fields)) continue;
-    const cols = headings ? { ...headings, header: true } : defaultColumns(record.fields, units);
-    const delimited = record.text.includes(delimiter) || record.fields.length > 1;
-    const read = readPart(record.fields, cols, units, delimited);
+    const columnsFor = (f) => (headings ? { ...headings, header: true } : defaultColumns(f, units));
+    let { fields } = record;
+    let cols = columnsFor(fields);
+    const delimited = record.text.includes(delimiter) || fields.length > 1;
+    let read = readPart(fields, cols, units, delimited);
+    // "Rail, 2' 6", 3 reads as quoted CSV. When that doesn't make a part,
+    // try the line again with its quotes as inch marks.
+    if (read.reason && record.quoted && !/[\r\n]/.test(record.text)) {
+      const literal = tidy(record.text.split(delimiter));
+      const literalCols = columnsFor(literal);
+      const retry = readPart(literal, literalCols, units, true);
+      if (!retry.reason) { fields = literal; cols = literalCols; read = retry; }
+    }
     const base = { line: record.line, text: record.text.trim().slice(0, TEXT_MAX) };
-    if (read.reason) { rows.push({ ...base, reason: read.reason }); continue; }
+    if (read.reason) {
+      if (unreadable++ < MAX_PROBLEMS) rows.push({ ...base, reason: read.reason });
+      continue;
+    }
     if (taken >= room) { leftOut++; continue; }
     taken++;
+    // A 285,5 mm width split at its comma shows up here as one value too many.
+    if (!headings) {
+      const used = Math.max(...Object.values(cols).map((c) => c.index)) + 1;
+      const extra = fields.slice(used).filter(Boolean).map((f) => clip(f));
+      if (extra.length) read.part.extra = extra;
+    }
     rows.push({ ...base, part: read.part });
   }
 
@@ -253,6 +313,7 @@ export function parseCutList(input, { units = 'in', room = MAX_PARTS } = {}) {
     rows,
     parts: rows.filter((r) => r.part).map((r) => r.part),
     problems: rows.filter((r) => r.reason),
+    unreadable,
     leftOut,
     hasHeadings: !!headings,
     delimiter,

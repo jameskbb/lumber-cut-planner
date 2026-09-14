@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { parseCutList, MAX_PARTS } from '../src/cut-list-import.js';
+import { parseCutList, MAX_PARTS, MAX_PROBLEMS } from '../src/cut-list-import.js';
 
 const close = (a, b) => assert.ok(Math.abs(a - b) < 1e-9, `${a} ≈ ${b}`);
 const brief = (p) => [p.name, p.length, p.width, p.qty];
@@ -126,7 +126,7 @@ test('reads SketchUp CutList exports, including a title line and repeated headin
 });
 
 test('skips blank lines, a byte order mark and Windows line endings', () => {
-  const r = parseCutList('﻿Side,36,11 1/4,2\r\n\r\n  \r\n,,,\r\nTop,24,12,1\r\n');
+  const r = parseCutList('\uFEFFSide,36,11 1/4,2\r\n\r\n  \r\n,,,\r\nTop,24,12,1\r\n');
   assert.deepEqual(r.parts.map(brief), [['Side', '36', '11 1/4', '2'], ['Top', '24', '12', '1']]);
   assert.deepEqual(r.rows.map((row) => row.line), [1, 5]);
 });
@@ -177,4 +177,74 @@ test('stores sizes as typed, trimmed, and caps long names', () => {
   assert.equal(r.parts[0].width, '23.625');
   assert.equal(parseCutList('').parts.length, 0);
   assert.equal(parseCutList(null).rows.length, 0);
+});
+
+test('a stray opening quote is literal and doesn’t swallow the lines after it', () => {
+  const r = parseCutList([
+    'Side, 36, 11 1/4, 2',
+    '"Top, 24, 12',
+    'Door, 35 7/8, wide, 2',
+    'Rail, 2\' 6", 3',
+    'Shelf, 22 1/2, 11 1/4, 3',
+  ].join('\n'));
+  assert.deepEqual(r.parts.map(brief), [
+    ['Side', '36', '11 1/4', '2'], ['"Top', '24', '12', '1'], ['Rail', '2\' 6"', '3', '1'], ['Shelf', '22 1/2', '11 1/4', '3'],
+  ]);
+  assert.deepEqual(r.problems.map((p) => p.line), [3]);
+  assert.deepEqual(r.rows.map((row) => row.line), [1, 2, 3, 4, 5]);
+});
+
+test('a quote is only a CSV quote when its closing quote ends the field', () => {
+  // Closed, but followed by more text: the quotes are inch marks.
+  assert.deepEqual(brief(parseCutList('"12" wide shelf, 24, 12').parts[0]), ['"12" wide shelf', '24', '12', '1']);
+  // Never closed.
+  assert.deepEqual(brief(parseCutList('"Top, 24, 12').parts[0]), ['"Top', '24', '12', '1']);
+  // Closed by an inch mark: read as CSV that makes no part, so the quotes are inch marks.
+  assert.deepEqual(brief(parseCutList('"Rail, 2\' 6", 3').parts[0]), ['"Rail', '2\' 6"', '3', '1']);
+  // Closed with spaces before the delimiter.
+  assert.deepEqual(brief(parseCutList('"Shelf, adjustable" , 22 1/2, 11 1/4, 3').parts[0]), ['Shelf, adjustable', '22 1/2', '11 1/4', '3']);
+});
+
+test('reads real quoted CSV: embedded delimiters, doubled quotes and quoted sizes', () => {
+  const csv = [
+    'Name,Length,Width,Qty',
+    '"Shelf, adjustable","22 1/2","11 1/4",3',
+    '"Door ""A""","35 7/8""",12,1',
+    '"Back',
+    'panel",36,23 1/4,1',
+    'Rail,20,3,2',
+  ].join('\r\n');
+  const r = parseCutList(csv);
+  assert.deepEqual(r.parts.map(brief), [
+    ['Shelf, adjustable', '22 1/2', '11 1/4', '3'], ['Door "A"', '35 7/8"', '12', '1'], ['Back\r\npanel', '36', '23 1/4', '1'], ['Rail', '20', '3', '2'],
+  ]);
+  assert.deepEqual(r.rows.map((row) => row.line), [2, 3, 4, 6]);
+  assert.equal(r.problems.length, 0);
+});
+
+test('reads fraction characters as fractions', () => {
+  const r = parseCutList('Side, 11½, ¾, 2\nRail, 2\' 6½", 3 ⅝\nStile, 30, 2⁄3');
+  assert.deepEqual(r.parts.map(brief), [['Side', '11 1/2', '3/4', '2'], ['Rail', '2\' 6 1/2"', '3 5/8', '1'], ['Stile', '30', '2/3', '1']]);
+  close(r.parts[0].values.length, 11.5);
+  close(r.parts[1].values.length, 30.5);
+  close(r.parts[1].values.width, 3.625);
+});
+
+test('lists values after the quantity, so a split decimal comma shows', () => {
+  const r = parseCutList('Side, 600, 285,5, 2', { units: 'mm' });
+  assert.deepEqual(brief(r.parts[0]), ['Side', '600', '285', '5']);
+  assert.deepEqual(r.parts[0].extra, ['2']);
+  assert.equal(parseCutList('Side, 600, 285, 2', { units: 'mm' }).parts[0].extra, undefined);
+  assert.equal(parseCutList('Name,Length,Width,Qty,Notes\nSide,600,285,2,oak').parts[0].extra, undefined);
+});
+
+test('keeps the first unreadable lines and counts the rest', () => {
+  const junk = Array.from({ length: MAX_PROBLEMS + 500 }, (_, i) => `junk ${i}`);
+  const r = parseCutList([...junk, 'Side, 36, 11 1/4, 2'].join('\n'));
+  assert.equal(r.problems.length, MAX_PROBLEMS);
+  assert.equal(r.unreadable, MAX_PROBLEMS + 500);
+  assert.equal(r.rows.length, MAX_PROBLEMS + 1);
+  assert.equal(r.problems.at(-1).text, `junk ${MAX_PROBLEMS - 1}`);
+  assert.deepEqual(brief(r.parts[0]), ['Side', '36', '11 1/4', '2']);
+  assert.equal(parseCutList('a\nb').unreadable, 2);
 });

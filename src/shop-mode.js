@@ -5,6 +5,7 @@
 import { renderSheet, nounFor } from './sheet-view.js';
 import { formatLength } from './units.js';
 import { buildShopSteps, cutKey, isStepDone, firstOpenStep, nextOpenStep, stepPieces } from './shop-steps.js';
+import { closeOnBack } from './back-gesture.js';
 
 // A second tap this soon after moving on is a double tap, not a second cut.
 const DOUBLE_TAP_MS = 350;
@@ -14,17 +15,22 @@ const WIDE = '(min-width: 700px) and (orientation: landscape), (min-width: 960px
 const joinWords = (words) => (words.length > 1 ? `${words.slice(0, -1).join(', ')} and ${words.at(-1)}` : words[0]);
 
 export function createShopMode(app) {
-  const { h, lenEl, dimsEl, units, colorOf, letterOf, markCut, getPlan, getDone, printLabels } = app;
+  const { h, lenEl, dimsEl, units, colorOf, letterOf, markCut, getPlan, getDone, printLabels, toast } = app;
   const entry = document.getElementById('shop-btn');
   const ui = {};
   let dialog = null;
+  let back = null;
   let shownPlan = null;
   let steps = [];
   let index = 0;
   let listOpen = false;
   let lastMove = 0;
   let lastSheet = -1;
-  let pushed = false;
+  // Steps passed over while they still had cuts to make. Later steps may need
+  // them, so they come round again and are marked in the step list.
+  let skipped = new Set();
+  // The step on screen is a skipped one that Done or Skip for now came back to.
+  let cameBack = false;
   let lock = null;
   let locking = false;
   let drawQueued = false;
@@ -54,7 +60,8 @@ export function createShopMode(app) {
     const done = getDone();
     const some = keys.some((k) => done.has(k));
     const all = keys.every((k) => done.has(k));
-    entry.textContent = some && !all ? 'Continue cutting' : 'Start cutting';
+    // With every cut ticked, the button opens the steps again from the first one.
+    entry.textContent = all ? 'Review cuts' : some ? 'Continue cutting' : 'Start cutting';
   }
   entry?.addEventListener('click', () => open());
 
@@ -68,7 +75,7 @@ export function createShopMode(app) {
     ui.figure = h('figure', { class: 'shop-figure' }, ui.caption, ui.art);
     ui.step = h('div', { class: 'shop-step' });
     ui.prev = h('button', { type: 'button', class: 'btn', onclick: () => prev() }, 'Previous');
-    ui.skip = h('button', { type: 'button', class: 'btn', onclick: () => next() }, 'Skip');
+    ui.skip = h('button', { type: 'button', class: 'btn', onclick: () => skip() }, 'Skip for now');
     ui.done = h('button', { type: 'button', class: 'btn btn-dark shop-done', onclick: () => primary() }, 'Done');
     ui.panel = h('div', { class: 'shop-panel' },
       ui.step,
@@ -87,6 +94,8 @@ export function createShopMode(app) {
     });
     dialog.addEventListener('close', cleanup);
     dialog.addEventListener('keydown', onKey);
+    // The phone's back gesture leaves shop mode rather than the app.
+    back = closeOnBack(dialog, 'shopMode');
     document.body.append(dialog);
     new ResizeObserver(queueDraw).observe(ui.art);
   }
@@ -101,7 +110,11 @@ export function createShopMode(app) {
   function replan() {
     shownPlan = plan();
     const fresh = buildShopSteps(shownPlan);
-    if (!fresh.length) { exit(); return; }
+    if (!fresh.length) {
+      exit();
+      toast?.('The plan changed and has no cuts to make now, so you’re back at the plan.');
+      return;
+    }
     const same = stepsSig(fresh) === stepsSig(steps);
     steps = fresh;
     if (!same) {
@@ -109,6 +122,8 @@ export function createShopMode(app) {
       index = first < 0 ? steps.length : first;
       listOpen = false;
       lastSheet = -1;
+      skipped = new Set();
+      cameBack = false;
     }
     update(!same);
   }
@@ -118,14 +133,16 @@ export function createShopMode(app) {
     steps = buildShopSteps(shownPlan);
     if (!steps.length) return;
     if (!dialog) build();
+    // Every cut done ("Review cuts"): go through them again from the start.
     const first = firstOpenStep(steps, getDone());
-    index = first < 0 ? steps.length : first;
+    index = first < 0 ? 0 : first;
     listOpen = false;
     lastSheet = -1;
     lastMove = 0;
+    skipped = new Set();
+    cameBack = false;
     dialog.showModal();
-    // The phone's back gesture leaves shop mode rather than the app.
-    try { history.pushState({ shopMode: true }, ''); pushed = true; } catch { pushed = false; }
+    back.opened();
     wake();
     update();
   }
@@ -137,20 +154,11 @@ export function createShopMode(app) {
   function cleanup() {
     releaseWake();
     listOpen = false;
-    if (pushed) {
-      pushed = false;
-      if (history.state?.shopMode) history.back();
-    }
+    back.closed();
     app.onClose?.();
     syncEntry();
     if (entry && !entry.hidden) entry.focus();
   }
-
-  window.addEventListener('popstate', () => {
-    if (!dialog?.open) return;
-    pushed = false;
-    dialog.close();
-  });
 
   // ------------------------------------------------------------ keep the screen on
 
@@ -180,8 +188,13 @@ export function createShopMode(app) {
 
   // ------------------------------------------------------------ moving between steps
 
-  function moveTo(i) {
-    index = Math.max(0, Math.min(i, steps.length));
+  // `auto` is a move made for the person (Done, Skip for now), not a jump they chose.
+  function moveTo(i, auto = false) {
+    const target = Math.max(0, Math.min(i, steps.length));
+    const done = getDone();
+    for (let k = index; k < target && k < steps.length; k++) if (!isStepDone(steps[k], done)) skipped.add(k);
+    cameBack = auto && target < steps.length && skipped.has(target) && !isStepDone(steps[target], done);
+    index = target;
     lastMove = Date.now();
     listOpen = false;
     update();
@@ -198,12 +211,12 @@ export function createShopMode(app) {
     const step = steps[index];
     const done = getDone();
     if (isStepDone(step, done)) {
-      moveTo(index + 1 < steps.length ? index + 1 : afterLast());
+      moveTo(index + 1 < steps.length ? index + 1 : afterLast(), true);
       return;
     }
     for (const k of step.keys) if (!done.has(k)) markCut(k, true);
     const n = nextOpenStep(steps, getDone(), index);
-    moveTo(n < 0 ? steps.length : n);
+    moveTo(n < 0 ? steps.length : n, true);
   }
 
   function prev() {
@@ -212,6 +225,20 @@ export function createShopMode(app) {
 
   function next() {
     if (index < steps.length - 1) moveTo(index + 1);
+  }
+
+  // Skip for now: on to the next step with a cut to make, coming round to
+  // earlier skipped steps after the last one.
+  function skipTarget() {
+    const n = nextOpenStep(steps, getDone(), index);
+    return n === index ? -1 : n;
+  }
+
+  function skip() {
+    const n = skipTarget();
+    if (n < 0) return;
+    skipped.add(index);
+    moveTo(n, true);
   }
 
   function markNotDone() {
@@ -294,6 +321,7 @@ export function createShopMode(app) {
       ? (rip ? 'measured from each piece’s top edge' : 'measured from each piece’s left end')
       : (rip ? 'measured from its top edge' : 'measured from its left end');
     const kids = [
+      cameBack && !stepDone ? h('p', { class: 'shop-back' }, count > 1 ? 'Back to the cuts you skipped.' : 'Back to the cut you skipped.') : null,
       head,
       h('p', { class: 'shop-setting' }, lenEl(step.offset),
         h('span', { class: `shop-unit${units() === 'mm' ? ' is-mm' : ''}`, 'aria-hidden': 'true' }, units() === 'mm' ? 'mm' : '"')),
@@ -312,11 +340,11 @@ export function createShopMode(app) {
       kids.push(h('p', { class: 'shop-status' }, `${doneCount} of these ${count} cuts are done.`));
     }
     ui.step.classList.toggle('is-done', stepDone);
-    ui.step.replaceChildren(...kids);
+    ui.step.replaceChildren(...kids.filter(Boolean));
 
     ui.prev.disabled = index === 0;
     ui.skip.hidden = stepDone;
-    ui.skip.disabled = index >= steps.length - 1;
+    ui.skip.disabled = skipTarget() < 0;
     ui.done.textContent = stepDone ? 'Next step' : 'Done';
   }
 
@@ -405,6 +433,7 @@ export function createShopMode(app) {
       const rip = s.type === 'rip';
       const count = s.cuts.length;
       const isDone = isStepDone(s, done);
+      const wasSkipped = !isDone && skipped.has(i);
       const nums = s.cuts.map((c) => String(c.n));
       sections.at(-1).items.push(h('li', null, h('button', {
         type: 'button', class: `shop-jump${isDone ? ' is-done' : ''}`, 'aria-current': i === index ? 'step' : null,
@@ -415,11 +444,19 @@ export function createShopMode(app) {
         h('span', { class: 'sr-only' }, `Step ${i + 1}, ${count > 1 ? `cuts ${joinWords(nums)}` : `cut ${nums[0]}`}: `),
         count > 1 ? `${count} ${rip ? 'rips' : 'crosscuts'} at ` : `${rip ? 'Rip' : 'Crosscut'} at `,
         lenEl(s.offset),
-        isDone ? h('span', { class: 'sr-only' }, ', done') : null))));
+        isDone ? h('span', { class: 'sr-only' }, ', done') : null,
+        wasSkipped ? h('span', { class: 'shop-skipped' }, h('span', { class: 'sr-only' }, ', '), 'Skipped, still to do') : null))));
     });
     const sheets = plan().sheets;
+    const skippedCuts = [...skipped].filter((i) => i < steps.length)
+      .reduce((a, i) => a + steps[i].keys.filter((k) => !done.has(k)).length, 0);
+    const sum = `${doneCuts()} of ${totalCuts()} cuts done.`;
     ui.list.replaceChildren(
-      h('p', { class: 'shop-list-sum' }, `${doneCuts()} of ${totalCuts()} cuts done.`),
+      h('p', { class: 'shop-list-sum' }, skippedCuts
+        ? `${sum} ${skippedCuts === 1
+          ? 'The cut you skipped is still to do. It comes round again after the last step.'
+          : `The ${skippedCuts} cuts you skipped are still to do. They come round again after the last step.`}`
+        : sum),
       ...sections.map((sec) => h('section', null,
         h('h3', null, sheetTitle(sec.sheetIndex), h('span', { class: 'shop-list-stock' }, `, ${sheets[sec.sheetIndex].stockName}`)),
         h('ol', null, sec.items))));
@@ -441,7 +478,8 @@ export function createShopMode(app) {
       ? `Make ${nums.length} ${rip ? 'rips' : 'crosscuts'} at ${say(step.offset)}, measured from each piece’s ${rip ? 'top edge' : 'left end'}: cuts ${joinWords(nums)}.`
       : `Cut ${nums[0]}: ${rip ? 'rip' : 'crosscut'} the ${formatLength(p.l, units())} by ${formatLength(p.w, units())} piece at ${say(step.offset)}, measured from its ${rip ? 'top edge' : 'left end'}.`;
     const state = isStepDone(step, getDone()) ? ' Already done.' : '';
-    ui.live.textContent = `Step ${index + 1} of ${steps.length}.${where} ${what}${state}`;
+    const again = cameBack ? ' Back to a step you skipped.' : '';
+    ui.live.textContent = `Step ${index + 1} of ${steps.length}.${again}${where} ${what}${state}`;
   }
 
   return { open, syncEntry };

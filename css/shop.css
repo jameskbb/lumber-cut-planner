@@ -5,7 +5,8 @@
 .shop-start[hidden] { display: none; }
 .plan-head .plan-tools { margin-left: auto; }
 @media (max-width: 559px) {
-  .plan-head .shop-start { flex-basis: 100%; justify-content: center; }
+  /* Full width on its own line, with room before the notice or summary below. */
+  .plan-head .shop-start { flex-basis: 100%; justify-content: center; margin-bottom: 0.75rem; }
 }
 
 :root:has(.shop[open]) { overflow: hidden; }
@@ -56,6 +57,7 @@
 /* The step */
 .shop-panel { display: flex; flex-direction: column; justify-content: space-between; gap: 0.875rem; flex: 1 1 auto; min-height: 0; }
 .shop-step { min-height: 0; overflow-y: auto; }
+.shop-back { margin-bottom: 0.375rem; font-weight: 650; }
 .shop-head { display: flex; align-items: baseline; gap: 0.5rem; font-size: 1.25rem; font-weight: 700; font-stretch: 108%; line-height: 1.25; }
 .shop-head .step-n { align-self: center; }
 .shop .step-n { width: 1.75rem; height: 1.75rem; flex: none; font-size: 0.875rem; }
@@ -103,6 +105,7 @@
 .shop-jump:focus-visible { outline-offset: -2px; }
 .shop-jump-n { display: flex; flex-wrap: wrap; gap: 0.25rem; min-width: 1.75rem; }
 .shop-jump.is-done .shop-jump-text { color: var(--ink-2); text-decoration: line-through; text-decoration-thickness: 1px; }
+.shop-skipped { margin-left: 0.625rem; font-size: 0.8125rem; font-weight: 600; color: var(--ink-2); }
 
 /* Wide screens and phones on their side: diagram left, step right. */
 @media (min-width: 700px) and (orientation: landscape), (min-width: 960px) {

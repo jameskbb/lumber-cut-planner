@@ -704,6 +704,9 @@ function summaryEl() {
   return h('p', { class: 'summary' }, lead, h('strong', null, where), `, using ${pct}% of the material.`);
 }
 
+// Opens the "Paste a cut list" dialog; set in init() once it's ready.
+let openPasteCutList = null;
+
 function emptyEl(hasStock, hasParts) {
   let message, action;
   if (!hasStock && !hasParts) {
@@ -716,8 +719,10 @@ function emptyEl(hasStock, hasParts) {
     message = 'Add the sheets or boards you have to cut from.';
     action = h('button', { type: 'button', class: 'btn btn-dark', onclick: () => goToEmpty('stock') }, 'Add stock');
   }
+  const paste = hasParts ? null
+    : h('button', { type: 'button', class: 'btn', 'aria-haspopup': 'dialog', onclick: () => openPasteCutList?.() }, 'Paste a cut list');
   return h('div', { class: 'empty' }, h('p', null, message),
-    h('div', { class: 'actions-row' }, action, ' ', h('button', { type: 'button', class: 'btn', onclick: () => commands.example() }, 'Load example project')));
+    h('div', { class: 'actions-row' }, action, paste, h('button', { type: 'button', class: 'btn', onclick: () => commands.example() }, 'Load example project')));
 }
 
 function sheetEl(sheet, i, width) {
@@ -821,7 +826,7 @@ function markCut(cutKey, done) {
 
 // Shop mode shares the checklist's progress, so it ticks cuts through markCut.
 const shopMode = createShopMode({
-  h, lenEl, dimsEl, units, colorOf, letterOf, markCut, printLabels,
+  h, lenEl, dimsEl, units, colorOf, letterOf, markCut, printLabels, toast,
   getPlan: () => state.plan,
   getDone: () => state.progress.done,
   // markCut doesn't touch the checkboxes, so redraw the checklist on the way out.
@@ -1063,7 +1068,7 @@ function bindChrome() {
 
   $('#add-stock').addEventListener('click', () => addRow('stock'));
   $('#add-part').addEventListener('click', () => addRow('parts'));
-  initPasteCutList({ h, lenEl, withUndo, palette: PALETTE, state, button: $('#paste-parts') });
+  openPasteCutList = initPasteCutList({ h, lenEl, withUndo, palette: PALETTE, state, button: $('#paste-parts') }).open;
 
   const kerf = $('#kerf');
   kerf.dataset.field = 'kerf';

@@ -18,6 +18,7 @@ const SHELL = [
   'src/paste-cut-list.js',
   'src/shop-steps.js',
   'src/shop-mode.js',
+  'src/back-gesture.js',
   'fonts/archivo-wdth.woff2',
   'icons/icon.svg',
   'manifest.webmanifest',

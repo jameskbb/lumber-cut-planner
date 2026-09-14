@@ -1,5 +1,7 @@
 # Lumber Cut Planner
 
+![Lumber Cut Planner title card: a birch plywood sheet becomes a practical cut plan on a galvanized workbench](docs/images/readme-title-lumber-cut-planner.png)
+
 **Use it now: [jameskbb.github.io/lumber-cut-planner](https://jameskbb.github.io/lumber-cut-planner/)**
 
 Plan how to cut plywood sheets and boards into the parts for a project. Type in the stock you have and the parts you need, and the cut diagram updates as you type. You get a numbered cut order to tick off at the saw and a list of offcuts worth keeping.
@@ -8,6 +10,8 @@ Nothing to install and no account. It runs in your browser, on a phone or a lapt
 
 [![The cut plan for a small bookcase: two plywood sheets with numbered cuts and a checklist of cuts](docs/screenshot.png)](https://jameskbb.github.io/lumber-cut-planner/)
 
+![How it works section header: a sheet of stock becomes arranged parts and then a numbered cut order](docs/images/readme-header-how-it-works.png)
+
 ## How it works
 
 1. **Add your stock.** Each sheet or board, its size, and how many you have.
@@ -15,6 +19,8 @@ Nothing to install and no account. It runs in your browser, on a phone or a lapt
 3. **Read the plan.** Each sheet is drawn with its cuts numbered. The cut order tells you where to rip and crosscut, measured from the edge, so you can follow it at the saw.
 
 Open the app on first visit and it shows an example bookcase already laid out, so you can see a plan before typing anything.
+
+![Features section header: a finished cut plan is ready to save and share](docs/images/readme-header-features.png)
 
 ## Features
 
@@ -33,9 +39,13 @@ Open the app on first visit and it shows an example bookcase already laid out, s
 - **Shop output.** Print one page per sheet with a paper checklist, print individual part labels, or export the parts and placements as CSV.
 - **Phone friendly.** Add it to your home screen and it opens like an app.
 
+![Privacy section header: the cut plan stays inside the browser on your device](docs/images/readme-header-privacy.png)
+
 ## Privacy
 
 Nothing leaves your device. Projects are stored in your browser's local storage. A share link carries the project inside the link itself, after the `#`, which browsers don't send to any server.
+
+![Run it yourself section header: the local project needs no build step or dependencies](docs/images/readme-header-run-it-yourself.png)
 
 ## Run it yourself
 

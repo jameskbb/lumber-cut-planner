@@ -11,9 +11,11 @@
 //   lumber-cut-planner/progress/<id>   ticked-off cuts: {"sig":"…","done":["0-1"]}
 //   lumber-cut-planner/current         id of the project that was open last
 // Before this, one project lived at STORAGE_KEY and its progress at
-// LEGACY_PROGRESS_KEY; open() moves them into the layout above.
+// LEGACY_PROGRESS_KEY; open() moves them into the layout above. It does that
+// whenever they're there, because a tab still running the old code can write
+// them again after the move.
 
-import { sanitizeProject, newId, STORAGE_KEY } from './store.js';
+import { sanitizeProject, newId, exampleProject, STORAGE_KEY } from './store.js';
 
 export const MAX_PROJECTS = 100;
 export const INDEX_KEY = 'lumber-cut-planner/index';
@@ -69,6 +71,21 @@ export function copyName(name, taken = []) {
     const candidate = base.slice(0, NAME_MAX - suffix.length) + suffix;
     if (!names.has(candidate)) return candidate;
   }
+}
+
+/**
+ * A project's content as one string, with row ids swapped for positions, so two
+ * copies of the same project compare equal. Null for something that isn't a project.
+ */
+function contentKey(project) {
+  let p;
+  try { p = sanitizeProject(project); } catch { return null; }
+  const stockAt = new Map(p.stock.map((s, i) => [s.id, i]));
+  return JSON.stringify({
+    ...p,
+    stock: p.stock.map(({ id, ...rest }) => rest),
+    parts: p.parts.map(({ id, from, ...rest }) => ({ ...rest, from: from ? stockAt.get(from) : -1 })),
+  });
 }
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -164,18 +181,34 @@ export function createProjects(kv, { now = () => Date.now() } = {}) {
    */
   function save(id, project) {
     const body = JSON.stringify(project);
+    const name = cleanName(project.name);
     const list = entries();
     const entry = list.find((e) => e.id === id);
-    if (entry && entry.name === cleanName(project.name) && kv.get(projectKey(id)) === body) return false;
-    if (!entry && list.length >= MAX_PROJECTS) throw new Error(SAVE_FAILED(cleanName(project.name)));
+    if (entry && entry.name === name && kv.get(projectKey(id)) === body) return false;
+    if (!entry && list.length >= MAX_PROJECTS) throw new Error(SAVE_FAILED(name));
+    // The list entry is written before the project. If the project can't be
+    // written after it, the saved copy is still the old one, so the next save
+    // sees the difference and tries again instead of leaving the list stale.
+    const next = { id, name, updatedAt: now() };
     try {
-      kv.set(projectKey(id), body);
-      const next = { id, name: cleanName(project.name), updatedAt: now() };
       writeIndex(entry ? list.map((e) => (e.id === id ? next : e)) : [...list, next]);
     } catch {
-      throw new Error(SAVE_FAILED(cleanName(project.name)));
+      throw new Error(SAVE_FAILED(name));
+    }
+    try {
+      kv.set(projectKey(id), body);
+    } catch {
+      try { writeIndex(list); } catch { /* the next save puts it right */ }
+      throw new Error(SAVE_FAILED(name));
     }
     return true;
+  }
+
+  /** The saved project with the same content as this one (ids aside), most recently edited first, or null. */
+  function findSame(project) {
+    const key = contentKey(project);
+    if (!key) return null;
+    return list().find((e) => contentKey(read(e.id)) === key) || null;
   }
 
   function rename(id, name) {
@@ -220,33 +253,59 @@ export function createProjects(kv, { now = () => Date.now() } = {}) {
   }
 
   /**
+   * Moves a project saved by the old single-project version into the list, and
+   * makes it current. If the list already has one with the same content, that
+   * one is used and gets the old ticked cuts. The old keys are removed only once
+   * that has worked. Returns { project, progress } when it couldn't be saved.
+   */
+  function importLegacy(hasIndex) {
+    const raw = parse(LEGACY_PROJECT_KEY);
+    if (!raw) return null; // not there, or unreadable: nothing to keep
+    let project;
+    try { project = sanitizeProject(raw); } catch { return null; }
+    const rawProgress = parse(LEGACY_PROGRESS_KEY);
+    const progress = sanitizeProgress(rawProgress);
+    const clear = () => { kv.remove(LEGACY_PROJECT_KEY); kv.remove(LEGACY_PROGRESS_KEY); };
+
+    const same = findSame(project);
+    if (same) {
+      if (rawProgress !== undefined) {
+        const mine = readProgress(same.id);
+        const merged = mine.sig === progress.sig
+          ? { sig: mine.sig, done: [...new Set([...mine.done, ...progress.done])] }
+          : progress.done.length ? progress : mine;
+        if (!writeProgress(same.id, merged)) return null; // try again next time
+      }
+      clear();
+      setCurrent(same.id);
+      return null;
+    }
+    // An old tab opened after the move shows the example and saves it on the way out.
+    // Untouched, that carries nothing worth a place in the list.
+    if (hasIndex && !progress.done.length && contentKey(project) === contentKey(exampleProject())) {
+      clear();
+      return null;
+    }
+    try {
+      create(project, { progress });
+    } catch {
+      return { project, progress }; // storage is full or blocked: keep the old keys
+    }
+    clear();
+    return null;
+  }
+
+  /**
    * Loads the project to show at start-up, moving an old single saved project
    * into the list first. Damaged entries are dropped and named in `damaged`.
    * Returns { id, project, progress, damaged }; project is null for a first visit.
    */
   function open() {
     const damaged = [];
-    let list = readIndex();
-
-    if (list === null) {
-      // No index yet: this is a first visit, or the old single-project layout.
-      list = [];
-      const legacy = parse(LEGACY_PROJECT_KEY);
-      let project = null;
-      if (legacy) { try { project = sanitizeProject(legacy); } catch { /* unreadable: nothing to keep */ } }
-      if (project) {
-        const progress = sanitizeProgress(parse(LEGACY_PROGRESS_KEY));
-        try {
-          const entry = create(project, { progress });
-          kv.remove(LEGACY_PROJECT_KEY);
-          kv.remove(LEGACY_PROGRESS_KEY);
-          return { id: entry.id, project, progress, damaged };
-        } catch {
-          // Storage is full or blocked: keep the old keys and carry on unsaved.
-          return { id: null, project, progress, damaged };
-        }
-      }
-    }
+    const unsaved = importLegacy(readIndex() !== null);
+    let list = readIndex() || [];
+    // The old project couldn't be saved and there's nothing else: carry on with it unsaved.
+    if (unsaved && !list.length) return { id: null, ...unsaved, damaged };
 
     // An index that couldn't be read still leaves the last open project reachable.
     const current = kv.get(CURRENT_KEY);
@@ -278,5 +337,5 @@ export function createProjects(kv, { now = () => Date.now() } = {}) {
     kv.remove(progressKey(id));
   }
 
-  return { open, list, read, create, save, rename, duplicate, remove, restore, discard, readProgress, writeProgress, setCurrent };
+  return { open, list, read, create, save, findSame, rename, duplicate, remove, restore, discard, readProgress, writeProgress, setCurrent };
 }

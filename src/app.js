@@ -79,6 +79,8 @@ const toProgress = (p) => ({ sig: p.sig, done: new Set(p.done) });
 let saveTimer;
 let dirty = false;
 let saveFailed = false;
+// Projects created this session that nobody has named yet: naming one isn't a rename.
+const neverNamed = new Set();
 function save() {
   dirty = true;
   dismissProjectUndo();
@@ -91,7 +93,7 @@ function persist() {
   dirty = false;
   try {
     if (state.projectId) projects.save(state.projectId, state.project);
-    else { state.projectId = projects.create(state.project).id; saveProgress(); }
+    else saveDraft();
     saveFailed = false;
   } catch (err) {
     dirty = true;
@@ -99,12 +101,22 @@ function persist() {
     saveFailed = true;
   }
 }
+// Gives an unsaved project (the first-run example, New, Load example) its place
+// in the list. Throws a readable Error when storage fails.
+function saveDraft() {
+  dismissProjectUndo(); // that Undo would now throw away saved work
+  state.projectId = projects.create(state.project).id;
+  neverNamed.add(state.projectId);
+  saveProgress();
+}
 function flushSave() {
   if (dirty) persist();
 }
-// Ticked-off cuts are kept per project.
+// Ticked-off cuts are kept per project. Ticking a cut on a project that isn't
+// saved yet saves it first, the way an edit does.
 function saveProgress() {
   if (state.projectId) projects.writeProgress(state.projectId, { sig: state.progress.sig, done: [...state.progress.done] });
+  else if (state.progress.done.size) persist();
 }
 
 function showProject(id, project, progress, firstRun = false) {
@@ -125,7 +137,7 @@ function undoableProject(message, id, prev) {
   toast(message, {
     label: 'Undo',
     run: () => {
-      try { projects.remove(id); } catch { /* it stays in the list; nothing is lost */ }
+      if (id) { try { projects.remove(id); } catch { /* it stays in the list; nothing is lost */ } }
       goBack(prev);
       toast('Undone.');
     },
@@ -137,15 +149,32 @@ function dismissProjectUndo() {
   projectUndo = null;
 }
 
-// New, example, file and shared link each start a saved project. The open one stays in the list.
-function startProject(project, message) {
+// New and Load example open without saving. The project joins the list on its
+// first edit or ticked cut, so pressing New again and again doesn't fill the list.
+function startDraft(project, message) {
   flushSave();
   const prev = openState();
+  showProject(null, project, emptyProgress());
+  undoableProject(message, null, prev);
+}
+
+// A file or shared link joins the list, unless the same project is saved there already.
+// The open one stays in the list either way.
+function startProject(project, message) {
+  flushSave();
+  const same = projects.findSame(project);
+  if (same) {
+    if (same.id === state.projectId) { toast(`${same.name} is already open.`); return; }
+    const saved = projects.read(same.id);
+    showProject(same.id, saved, toProgress(projects.readProgress(same.id)));
+    toast(`Opened ${saved.name}, which you already had.`);
+    return;
+  }
+  const prev = openState();
   let entry;
-  try { entry = projects.create(project); } catch (err) { toast(err.message); return false; }
+  try { entry = projects.create(project); } catch (err) { toast(err.message); return; }
   showProject(entry.id, project, emptyProgress());
   undoableProject(message, entry.id, prev);
-  return true;
 }
 
 function openProject(id) {
@@ -166,7 +195,12 @@ function duplicateProject() {
   flushSave();
   const prev = openState();
   let copy;
-  try { copy = projects.duplicate(state.project); } catch (err) { toast(err.message); return; }
+  try {
+    // Duplicating a project that isn't saved yet keeps the original too.
+    if (!state.projectId) { saveDraft(); prev.id = state.projectId; }
+    copy = projects.duplicate(state.project);
+  } catch (err) { toast(err.message); return; }
+  neverNamed.add(copy.entry.id);
   showProject(copy.entry.id, copy.project, emptyProgress());
   undoableProject(`Duplicated ${prev.project.name}.`, copy.entry.id, prev);
 }
@@ -177,19 +211,14 @@ function renameProject() {
   input.select();
 }
 
-// Opens the most recently edited project, or a fresh one when none are left.
-// Returns the fresh one's id and contents, so Undo can tidy it away.
+// Opens the most recently edited project, or a new unsaved one when none are left.
 function openLatest() {
   for (const e of projects.list()) {
     const p = projects.read(e.id);
-    if (p) { showProject(e.id, p, toProgress(projects.readProgress(e.id))); return null; }
+    if (p) { showProject(e.id, p, toProgress(projects.readProgress(e.id))); return; }
     projects.discard(e.id);
   }
-  const blank = store.blankProject(units());
-  let id = null;
-  try { id = projects.create(blank).id; } catch { /* storage full: it stays open unsaved */ }
-  showProject(id, blank, emptyProgress());
-  return id && { id, text: JSON.stringify(store.sanitizeProject(blank)) };
+  showProject(null, store.blankProject(units()), emptyProgress());
 }
 
 function deleteProject() {
@@ -199,13 +228,12 @@ function deleteProject() {
   if (gone.id) {
     try { saved = projects.remove(gone.id); } catch { toast(`Couldn’t delete ${gone.project.name}. This browser’s storage is turned off.`); return; }
   }
-  const fresh = openLatest();
+  openLatest();
   toast(`Deleted ${gone.project.name}.`, {
     label: 'Undo',
     run: () => {
       flushSave();
       try { if (saved) projects.restore(saved); } catch (err) { toast(err.message); return; }
-      if (fresh && JSON.stringify(projects.read(fresh.id)) === fresh.text) projects.remove(fresh.id);
       goBack(gone);
       toast('Undone.');
     },
@@ -993,13 +1021,13 @@ const commands = {
   csv: exportCsv,
   projects: () => projectList.open(),
   new: () => {
-    if (!startProject(store.blankProject(units()), 'Started a new project.')) return;
+    startDraft(store.blankProject(units()), 'Started a new project.');
     setTab('setup');
     focusField('parts', state.project.parts[0].id, 'name');
   },
   open: () => $('#file-input').click(),
   save: saveFile,
-  example: () => startProject(store.exampleProject(), 'Loaded the example project.'),
+  example: () => startDraft(store.exampleProject(), 'Loaded the example project.'),
 };
 
 function bindChrome() {
@@ -1008,12 +1036,21 @@ function bindChrome() {
     document.title = `${e.target.value || 'Untitled project'} | Lumber Cut Planner`;
     save();
   });
+  // Giving a new project its first name isn't a rename, so only real renames get a toast.
   let nameBefore = '';
-  $('#project-name').addEventListener('focus', () => { nameBefore = state.project.name; });
+  let firstName = false;
+  $('#project-name').addEventListener('focus', () => {
+    nameBefore = state.project.name;
+    firstName = nameBefore === 'Untitled project' || !state.projectId || neverNamed.has(state.projectId);
+  });
   $('#project-name').addEventListener('change', (e) => {
     if (!e.target.value.trim()) { state.project.name = 'Untitled project'; e.target.value = state.project.name; save(); }
     flushSave();
-    if (state.project.name !== nameBefore) toast(`Renamed to ${state.project.name}.`);
+    if (state.project.name !== nameBefore) {
+      if (!firstName) toast(`Renamed to ${state.project.name}.`);
+      neverNamed.delete(state.projectId);
+      firstName = false;
+    }
     nameBefore = state.project.name;
   });
 

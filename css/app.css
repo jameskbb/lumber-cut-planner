@@ -149,6 +149,7 @@ ul, ol { margin: 0; padding: 0; list-style: none; }
 }
 .projects-open:hover { background: var(--ground); }
 .projects-open:focus-visible { background: var(--ground); outline-offset: -2px; }
+.projects-current:focus-visible, .projects-title:focus-visible { border-radius: var(--r-s); outline-offset: -2px; }
 .projects-name { grid-column: 2; font-weight: 600; overflow-wrap: anywhere; }
 .projects-when { grid-column: 2; font-size: 0.8125rem; color: var(--ink-2); }
 .projects-check { grid-column: 1; grid-row: 1; display: grid; color: var(--ink); }

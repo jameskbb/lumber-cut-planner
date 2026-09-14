@@ -241,6 +241,124 @@ test('a failed index write does not leave half a project behind', () => {
   assert.deepEqual([...kv.map.keys()], []);
 });
 
+test('a save that fails halfway is tried again in full next time', () => {
+  const { projects, kv, tick } = setup();
+  const a = projects.create(named('Shelf'));
+  const realSet = kv.set;
+  const failOn = (bad) => { kv.set = (key, value) => { if (key === bad) throw new Error('full'); realSet(key, value); }; };
+
+  // The list can't be written: the same save must still go through later.
+  tick();
+  const edited = named('Shelf');
+  edited.kerf = '1/16';
+  failOn(INDEX_KEY);
+  assert.throws(() => projects.save(a.id, edited), /Couldn’t save Shelf/);
+  kv.set = realSet;
+  tick();
+  assert.equal(projects.save(a.id, edited), true);
+  assert.deepEqual(projects.list(), [{ id: a.id, name: 'Shelf', updatedAt: 3000 }]);
+  assert.equal(projects.read(a.id).kerf, '1/16');
+
+  // The project can't be written: the list keeps its old name, and the retry fixes both.
+  tick();
+  const renamed = { ...edited, name: 'Wall shelf' };
+  failOn(projectKey(a.id));
+  assert.throws(() => projects.save(a.id, renamed));
+  kv.set = realSet;
+  assert.deepEqual(projects.list().map((e) => e.name), ['Shelf']);
+  assert.equal(projects.save(a.id, renamed), true);
+  assert.deepEqual(projects.list().map((e) => e.name), ['Wall shelf']);
+  assert.equal(projects.read(a.id).name, 'Wall shelf');
+});
+
+test('brings in an old project written after the move, by a tab still on the old version', () => {
+  const { projects, kv, tick } = setup();
+  const first = projects.create(named('Bookcase'));
+  tick();
+  const late = exampleProject();
+  late.name = 'Garage shelves';
+  late.kerf = '3/32';
+  kv.set(LEGACY_PROJECT_KEY, JSON.stringify(late));
+  kv.set(LEGACY_PROGRESS_KEY, JSON.stringify({ sig: 's', done: ['0-1'] }));
+
+  const opened = projects.open();
+  assert.notEqual(opened.id, first.id);
+  assert.equal(opened.project.name, 'Garage shelves');
+  assert.deepEqual(opened.progress, { sig: 's', done: ['0-1'] });
+  assert.deepEqual(projects.list().map((e) => e.name), ['Garage shelves', 'Bookcase']);
+  assert.equal(kv.get(LEGACY_PROJECT_KEY), null);
+  assert.equal(kv.get(LEGACY_PROGRESS_KEY), null);
+});
+
+test('an old project that matches a saved one is not added twice, and its ticked cuts carry over', () => {
+  const { projects, kv, tick } = setup();
+  const shelves = exampleProject();
+  shelves.name = 'Garage shelves';
+  const a = projects.create(shelves);
+  projects.writeProgress(a.id, { sig: 's', done: ['0-1'] });
+  tick();
+  const b = projects.create(named('Workbench'));
+  assert.equal(kv.get(CURRENT_KEY), b.id);
+
+  // The old tab saves the same project on its way out, with one more cut ticked.
+  kv.set(LEGACY_PROJECT_KEY, JSON.stringify(shelves));
+  kv.set(LEGACY_PROGRESS_KEY, JSON.stringify({ sig: 's', done: ['0-2'] }));
+  const opened = projects.open();
+  assert.equal(opened.id, a.id);
+  assert.deepEqual(opened.progress, { sig: 's', done: ['0-1', '0-2'] });
+  assert.equal(projects.list().length, 2);
+  assert.equal(kv.get(LEGACY_PROJECT_KEY), null);
+  assert.equal(kv.get(LEGACY_PROGRESS_KEY), null);
+});
+
+test('keeps an old project written after the move in place if it cannot be saved yet', () => {
+  const { projects, kv } = setup();
+  const a = projects.create(named('Bookcase'));
+  const late = JSON.stringify(named('Garage shelves'));
+  kv.set(LEGACY_PROJECT_KEY, late);
+  const realSet = kv.set;
+  kv.set = (key, value) => { if (key.startsWith('lumber-cut-planner/projects/')) throw new Error('full'); realSet(key, value); };
+
+  const opened = projects.open();
+  assert.equal(opened.id, a.id);
+  assert.equal(kv.get(LEGACY_PROJECT_KEY), late);
+  kv.set = realSet;
+  assert.equal(projects.open().project.name, 'Garage shelves');
+  assert.equal(kv.get(LEGACY_PROJECT_KEY), null);
+});
+
+test('drops the untouched example an old tab saves after the move', () => {
+  const { projects, kv } = setup();
+  const a = projects.create(named('Bookcase'));
+  kv.set(LEGACY_PROJECT_KEY, JSON.stringify(exampleProject()));
+  kv.set(LEGACY_PROGRESS_KEY, JSON.stringify({ sig: 's', done: [] }));
+  assert.equal(projects.open().id, a.id);
+  assert.deepEqual(projects.list().map((e) => e.name), ['Bookcase']);
+  assert.equal(kv.get(LEGACY_PROJECT_KEY), null);
+});
+
+test('finds a saved project with the same content, so opening it twice adds nothing', () => {
+  const { projects, tick } = setup();
+  const shared = sanitizeProject({ ...exampleProject(), name: 'Garage shelves' });
+  const a = projects.create(shared);
+  tick();
+  projects.create(named('Workbench'));
+
+  assert.equal(projects.findSame(structuredClone(shared))?.id, a.id);
+  // The same project with fresh row ids still counts as the same.
+  const sameRows = sanitizeProject({
+    ...shared,
+    stock: shared.stock.map((s) => ({ ...s, id: `x${s.id}` })),
+    parts: shared.parts.map((p) => ({ ...p, id: `y${p.id}`, from: p.from && `x${p.from}` })),
+  });
+  assert.equal(projects.findSame(sameRows)?.id, a.id);
+  // Any real difference, the name included, makes it a different project.
+  assert.equal(projects.findSame({ ...shared, name: 'Garage shelves 2' }), null);
+  assert.equal(projects.findSame({ ...shared, kerf: '3/32' }), null);
+  assert.equal(projects.findSame({ ...shared, parts: shared.parts.map((p) => ({ ...p, from: '' })) }), null);
+  assert.equal(projects.findSame({ nonsense: true }), null);
+});
+
 test('describes when a project was last edited in plain words', () => {
   const now = new Date(2026, 8, 13, 15, 0).getTime();
   assert.equal(editedLabel(new Date(2026, 8, 13, 0, 5).getTime(), now), 'Edited today');

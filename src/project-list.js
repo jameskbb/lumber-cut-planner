@@ -20,7 +20,8 @@ const CHECK = 'M4.5 10.5l3.5 3.5 7.5-8';
  * @param {object} o.actions       { open(id), create(), rename(), duplicate(), remove() }
  */
 export function createProjectList({ h, iconEl, panel, opener, entries, currentId, actions }) {
-  const buttons = () => [...panel.querySelectorAll('button')];
+  // The open project's row takes focus too, so the arrow keys can come back to it.
+  const stops = () => [...panel.querySelectorAll('.projects-current, button')];
 
   function close({ restoreFocus = true } = {}) {
     if (panel.hidden) return;
@@ -33,7 +34,7 @@ export function createProjectList({ h, iconEl, panel, opener, entries, currentId
 
   function currentRow(e) {
     const name = e.name;
-    return h('li', { class: 'projects-current', 'aria-current': 'true' },
+    return h('li', { class: 'projects-current', 'aria-current': 'true', tabindex: '-1' },
       h('span', { class: 'projects-check' }, iconEl(CHECK)),
       h('p', { class: 'projects-name' }, name, h('span', { class: 'sr-only' }, ', open now')),
       h('p', { class: 'projects-when' }, editedLabel(e.updatedAt)),
@@ -57,7 +58,7 @@ export function createProjectList({ h, iconEl, panel, opener, entries, currentId
   function render() {
     const cur = currentId();
     panel.replaceChildren(
-      h('h2', { class: 'projects-title', id: 'projects-h' }, 'Your projects'),
+      h('h2', { class: 'projects-title', id: 'projects-h', tabindex: '-1' }, 'Your projects'),
       h('ul', { class: 'projects-list' }, entries().map((e) => (e.id === cur ? currentRow(e) : otherRow(e)))),
       h('div', { class: 'projects-foot' },
         h('button', { type: 'button', class: 'btn btn-dark', onclick: run(actions.create) }, 'New project'),
@@ -67,15 +68,16 @@ export function createProjectList({ h, iconEl, panel, opener, entries, currentId
   function open() {
     render();
     panel.hidden = false;
-    buttons()[0]?.focus();
+    // Start on the open project, not on its Rename button.
+    (panel.querySelector('.projects-current') || panel.querySelector('.projects-title')).focus();
   }
 
   panel.addEventListener('keydown', (e) => {
-    const list = buttons();
+    const list = stops();
     const i = list.indexOf(document.activeElement);
     if (e.key === 'Escape') { e.stopPropagation(); close(); }
     else if (e.key === 'ArrowDown') { e.preventDefault(); list[(i + 1) % list.length].focus(); }
-    else if (e.key === 'ArrowUp') { e.preventDefault(); list[(i - 1 + list.length) % list.length].focus(); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); list[i < 0 ? list.length - 1 : (i - 1 + list.length) % list.length].focus(); }
   });
   // Tabbing or clicking away closes it, like the menu.
   panel.addEventListener('focusout', (e) => {

@@ -2,6 +2,13 @@
 
 ![Lumber Cut Planner title card: a birch plywood sheet becomes a practical cut plan on a galvanized workbench](docs/images/readme-title-lumber-cut-planner.png)
 
+<p align="center">
+  <a href="LICENSE"><img alt="License" src="https://img.shields.io/github/license/jameskbb/lumber-cut-planner?style=for-the-badge&label=License&color=blue"></a>
+  <a href="package.json"><img alt="JavaScript" src="https://img.shields.io/badge/JavaScript-no%20build-F7DF1E?style=for-the-badge&logo=javascript&logoColor=black"></a>
+  <a href="https://jameskbb.github.io/lumber-cut-planner/"><img alt="Live site" src="https://img.shields.io/website?url=https%3A%2F%2Fjameskbb.github.io%2Flumber-cut-planner%2F&label=Live&up_message=online&down_message=offline&style=for-the-badge&logo=githubpages&logoColor=white"></a>
+  <a href="manifest.webmanifest"><img alt="PWA" src="https://img.shields.io/badge/PWA-works%20offline-5A0FC8?style=for-the-badge&logo=pwa&logoColor=white"></a>
+</p>
+
 **Use it now: [jameskbb.github.io/lumber-cut-planner](https://jameskbb.github.io/lumber-cut-planner/)**
 
 Plan how to cut plywood sheets and boards into the parts for a project. Type in the stock you have and the parts you need, and the cut diagram updates as you type. You get a numbered cut order to tick off at the saw and a list of offcuts worth keeping.

@@ -3,6 +3,7 @@
 ![Lumber Cut Planner title card: a birch plywood sheet becomes a practical cut plan on a galvanized workbench](docs/images/readme-title-lumber-cut-planner.png)
 
 <p align="center">
+  <a href="https://github.com/jameskbb/lumber-cut-planner/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/jameskbb/lumber-cut-planner/ci.yml?branch=main&style=for-the-badge&label=CI&logo=githubactions&logoColor=white"></a>
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/github/license/jameskbb/lumber-cut-planner?style=for-the-badge&label=License&color=blue"></a>
   <a href="package.json"><img alt="JavaScript" src="https://img.shields.io/badge/JavaScript-no%20build-F7DF1E?style=for-the-badge&logo=javascript&logoColor=black"></a>
   <a href="https://jameskbb.github.io/lumber-cut-planner/"><img alt="Live site" src="https://img.shields.io/website?url=https%3A%2F%2Fjameskbb.github.io%2Flumber-cut-planner%2F&label=Live&up_message=online&down_message=offline&style=for-the-badge&logo=githubpages&logoColor=white"></a>

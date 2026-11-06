@@ -43,7 +43,7 @@ Primary buttons are graphite (`.btn-dark`); everything else is outlined (`.btn`)
 - Sentence case, plain verbs, no filler. Errors explain what happened and how to fix it; they don't apologize.
 - A button says exactly what happens, and the toast echoes it: "Add 1 sheet of 3/4 birch plywood" gives "Added 1 sheet of 3/4 birch plywood."
 - Say "sheet of 3/4 plywood", never "1 3/4 plywood", which reads as a fraction.
-- Avoid template tells: middle-dot lists ("A · B · C"), arrows standing in for words ("Grain → length"), all-caps labels, "Word — fragment" headings, and decorative labels above content.
+- Avoid template tells: middle-dot lists ("A · B · C"), arrows standing in for words ("Grain → length"), all-caps labels, headings that join a word and a fragment with a long dash, and decorative labels above content.
 
 Keep the vocabulary consistent:
 

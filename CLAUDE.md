@@ -1,5 +1,7 @@
 # Lumber Cut Planner
 
+`CLAUDE.md` and `AGENTS.md` are the same document under two names so every coding agent follows identical rules. Change both together; they must stay byte-identical.
+
 A zero-dependency static web app (installable, works offline) that plans cuts for plywood and boards. Hosted on GitHub Pages from `main`; there's no build step.
 
 **Before changing anything people see (layout, styles, copy, notices, labels, printouts), read [DESIGN.md](DESIGN.md) and follow it.**
@@ -7,7 +9,7 @@ A zero-dependency static web app (installable, works offline) that plans cuts fo
 ## Commands
 
 - `npm start` serves the app at http://localhost:8000 (ES modules don't load from `file://`).
-- `npm test` runs the Node test suite.
+- `npm test` runs the Node test suite (`node --test`). Run it before every push; CI runs it on every push and pull request to `main`.
 
 ## Code
 
@@ -19,4 +21,7 @@ A zero-dependency static web app (installable, works offline) that plans cuts fo
 ## Repo rules
 
 - The repo is public: no secrets, emails or absolute home paths in files.
-- There's deliberately no license. Don't add one.
+- The repo is licensed MIT (see [LICENSE](LICENSE)). Keep the license file and README badge in place.
+- Single branch `main`, no prod branch. Every push to `main` redeploys the live GitHub Pages site. Never force-push or rewrite published history.
+- Never write an em dash in code, comments, docs, UI text or commit messages. Reword with a colon, semicolon, comma, parentheses or a new sentence; don't substitute a hyphen or en dash.
+- Interface changes update the README images in `docs/images/` in the same change.
